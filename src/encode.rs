@@ -11,8 +11,8 @@ use rand::{
 use crate::{FragmentKey, StorageObject, Thumbnail};
 
 pub struct FragmentMeta {
-    object_thumbnail: Thumbnail,
-    index: u32,
+    pub object_thumbnail: Thumbnail,
+    pub index: u32,
     size: u32,
 }
 

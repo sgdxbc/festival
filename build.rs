@@ -15,6 +15,7 @@ fn main() {
     let out_dir = env::var_os("OUT_DIR").unwrap();
     let dest_path = Path::new(&out_dir).join("rho.rs");
     let mut dest = File::create(dest_path).unwrap();
+    writeln!(dest, "#[allow(clippy::excessive_precision)]").unwrap();
     writeln!(dest, "[").unwrap();
     for value in rho {
         writeln!(dest, "    {value:.32},").unwrap();

@@ -3,7 +3,7 @@ pub mod network;
 
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap},
+    collections::{BTreeMap, BinaryHeap, HashMap},
 };
 
 use encode::{DecodeContext, FragmentMeta};
@@ -29,16 +29,37 @@ pub struct Peer {
 
 pub struct System {
     virtual_time: VirtualInstant,
+    events: BinaryHeap<(Reverse<VirtualInstant>, SystemEvent)>,
     peers: HashMap<PeerAddress, Peer>,
     route: Route,
-    events: BinaryHeap<(Reverse<VirtualInstant>, SystemEvent)>,
+    fragment_cache: HashMap<Thumbnail, BTreeMap<u32, PeerAddress>>,
+    config: SystemConfig,
+}
 
-    n_faulty: u32,
-    object_size: u32,
-    n_fragment: u32,
-    age_duration: VirtualDuration,
-    fault_switch_duration: VirtualDuration,
-    checkpoint_duration: VirtualDuration,
+pub struct SystemConfig {
+    pub n_peer: u32,
+    pub n_faulty_peer: u32,
+    pub n_object: u32,
+    pub object_size: u32,
+    pub n_fragment: u32,
+    pub age_duration: VirtualDuration,
+    pub fault_switch_duration: VirtualDuration,
+    pub checkpoint_duration: VirtualDuration,
+}
+
+impl Default for SystemConfig {
+    fn default() -> Self {
+        Self {
+            n_peer: 100000,
+            n_faulty_peer: 10000,
+            n_object: 10,
+            object_size: 5000,
+            n_fragment: 6400,
+            age_duration: 86400,
+            fault_switch_duration: 10 * 86400,
+            checkpoint_duration: 86400,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,20 +71,10 @@ pub enum SystemEvent {
 }
 
 impl System {
-    pub fn new(
-        rng: &mut impl Rng,
-        n_peer: u32,
-        n_faulty: u32,
-        n_object: u32,
-        object_size: u32,
-        n_fragment: u32,
-        age_duration: VirtualDuration,
-        fault_switch_duration: VirtualDuration,
-        checkpoint_duration: VirtualDuration,
-    ) -> Self {
+    pub fn new(rng: &mut impl Rng, config: SystemConfig) -> Self {
         let mut peers = HashMap::new();
-        let mut route = Route::new();
-        for _ in 0..n_peer {
+        let mut route = Route::Empty;
+        for _ in 0..config.n_peer {
             let address = rng.gen();
             peers.insert(
                 address,
@@ -76,26 +87,21 @@ impl System {
         }
         let mut system = Self {
             virtual_time: 0,
+            events: Default::default(),
             peers,
             route,
-            events: Default::default(),
-
-            n_faulty,
-            object_size,
-            n_fragment,
-            age_duration,
-            fault_switch_duration,
-            checkpoint_duration,
+            fragment_cache: Default::default(),
+            config,
         };
-        system.insert_event(checkpoint_duration, SystemEvent::Checkpoint);
-        for _ in 0..n_object {
+        system.insert_event(system.config.checkpoint_duration, SystemEvent::Checkpoint);
+        for _ in 0..system.config.n_object {
             let object = StorageObject {
                 thumbnail: rng.gen(),
-                size: object_size,
+                size: system.config.object_size,
             };
             system.insert_object(&object, 0);
             system.insert_event(
-                (0..age_duration).choose(rng).unwrap(),
+                (0..system.config.age_duration).choose(rng).unwrap(),
                 SystemEvent::Celebrate(object, 1),
             );
         }
@@ -103,11 +109,14 @@ impl System {
             .peers
             .keys()
             .copied()
-            .choose_multiple(rng, n_faulty as _)
+            .choose_multiple(rng, system.config.n_faulty_peer as _)
         {
             system.compromise(&address);
         }
-        system.insert_event(fault_switch_duration, SystemEvent::FaultSwitch);
+        system.insert_event(
+            system.config.fault_switch_duration,
+            SystemEvent::FaultSwitch,
+        );
         system
     }
 
@@ -117,29 +126,36 @@ impl System {
     }
 
     fn insert_object(&mut self, object: &StorageObject, age: u32) {
-        for index in self.n_fragment * age..self.n_fragment * (age + 1) {
+        let cache = self.fragment_cache.entry(object.thumbnail).or_default();
+        for index in self.config.n_fragment * age..self.config.n_fragment * (age + 1) {
             let fragment = FragmentMeta::new(object, index);
             let key = fragment.key();
-            let peer = self.peers.get_mut(self.route.find(&key)).unwrap();
+            let address = self.route.find(&key);
+            let peer = self.peers.get_mut(address).unwrap();
             if peer.faulty_deadline.is_none() {
                 peer.fragments.insert(key, fragment);
+                cache.insert(index, *address);
             }
         }
     }
 
     fn check_object(&self, object: &StorageObject, age: u32) {
         let mut fragments = Vec::new();
-        for index in self.n_fragment * age..self.n_fragment * (age + 1) {
+        for (&index, address) in self.fragment_cache[&object.thumbnail]
+            .range(self.config.n_fragment * age..self.config.n_fragment * (age + 1))
+        {
             let fragment = FragmentMeta::new(object, index);
-            let key = fragment.key();
-            if self.peers[self.route.find(&key)]
-                .fragments
-                .contains_key(&key)
-            {
-                fragments.push(fragment);
-            }
+            // let key = fragment.key();
+            // if self.peers[self.route.find(&key)]
+            //     .fragments
+            //     .contains_key(&key)
+            // {
+            //     fragments.push(fragment);
+            // }
+            assert!(self.peers[address].fragments.contains_key(&fragment.key()));
+            fragments.push(fragment);
         }
-        if fragments.len() as u32 >= self.object_size * 108 / 100 {
+        if fragments.len() as u32 >= self.config.object_size * 108 / 100 {
             return;
         }
         let mut context = DecodeContext::new(object);
@@ -152,36 +168,53 @@ impl System {
         if peer.faulty_deadline.is_some() {
             assert!(peer.fragments.is_empty());
         }
-        peer.fragments.clear();
-        peer.faulty_deadline = Some(self.virtual_time + self.fault_switch_duration); //
-        self.insert_event(self.fault_switch_duration, SystemEvent::ResetPeer(*address));
+        for (_, fragment) in peer.fragments.drain() {
+            // it is ok to have no cache, maybe already cleaned during celebration
+            if let Some(cache_address) = self
+                .fragment_cache
+                .get_mut(&fragment.object_thumbnail)
+                .unwrap()
+                .remove(&fragment.index)
+            {
+                assert_eq!(&cache_address, address);
+            }
+        }
+        peer.faulty_deadline = Some(self.virtual_time + self.config.fault_switch_duration); //
+        self.insert_event(
+            self.config.fault_switch_duration,
+            SystemEvent::ResetPeer(*address),
+        );
     }
 
     fn handle_event(&mut self, event: SystemEvent, rng: &mut impl Rng) {
         match event {
             SystemEvent::Checkpoint => {
-                println!(
-                    "Checkpoint Time {:?}days",
-                    self.virtual_time as f32 / 86400.
-                );
-                self.insert_event(self.checkpoint_duration, SystemEvent::Checkpoint);
+                println!("Checkpoint Time {}days", self.virtual_time / 86400);
+                self.insert_event(self.config.checkpoint_duration, SystemEvent::Checkpoint);
             }
             SystemEvent::Celebrate(object, age) => {
                 self.check_object(&object, age - 1);
+                self.fragment_cache
+                    .get_mut(&object.thumbnail)
+                    .unwrap()
+                    .clear(); // careful
                 self.insert_object(&object, age);
-                // garbage collection?
-                self.insert_event(self.age_duration, SystemEvent::Celebrate(object, age + 1));
+                // garbage collection on peers?
+                self.insert_event(
+                    self.config.age_duration,
+                    SystemEvent::Celebrate(object, age + 1),
+                );
             }
             SystemEvent::FaultSwitch => {
                 for address in self
                     .peers
                     .keys()
                     .copied()
-                    .choose_multiple(rng, self.n_faulty as _)
+                    .choose_multiple(rng, self.config.n_faulty_peer as _)
                 {
                     self.compromise(&address);
                 }
-                self.insert_event(self.fault_switch_duration, SystemEvent::FaultSwitch);
+                self.insert_event(self.config.fault_switch_duration, SystemEvent::FaultSwitch);
             }
             SystemEvent::ResetPeer(address) => {
                 let faulty_deadline = self.peers[&address].faulty_deadline.unwrap();

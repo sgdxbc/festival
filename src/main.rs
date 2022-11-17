@@ -1,18 +1,14 @@
-use festival::System;
+use festival::{System, SystemConfig};
 use rand::{rngs::StdRng, SeedableRng};
 
 fn main() {
     let mut rng = StdRng::seed_from_u64(0);
     let mut system = System::new(
         &mut rng,
-        100000,
-        10000,
-        10,
-        5000,
-        6400,
-        86400,
-        86400 * 10,
-        86400,
+        SystemConfig {
+            //
+            ..Default::default()
+        },
     );
-    system.run(&mut rng, 86400 * 365);
+    system.run(&mut rng, 86400 * 100);
 }

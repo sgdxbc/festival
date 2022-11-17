@@ -12,10 +12,6 @@ fn level_bit(k: &[u8; 32], level: usize) -> u8 {
 }
 
 impl Route {
-    pub fn new() -> Self {
-        Self::Empty
-    }
-
     pub fn find(&self, key: &FragmentKey) -> &PeerAddress {
         self.find_level(key, 0)
     }
@@ -92,7 +88,7 @@ mod tests {
     #[test]
     fn find_closest() {
         for _ in 0..10 {
-            let mut route = Route::new();
+            let mut route = Route::Empty;
             let mut addresses = Vec::new();
             for _ in 0..1000 {
                 let address = random();
@@ -107,7 +103,7 @@ mod tests {
 
     #[test]
     fn reproducible_find() {
-        let mut route = Route::new();
+        let mut route = Route::Empty;
         for _ in 0..1000 {
             route.insert(random());
         }
