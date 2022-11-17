@@ -1,6 +1,6 @@
 use crate::{FragmentKey, PeerAddress};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Route {
     Empty,
     Peer(PeerAddress),
@@ -41,14 +41,38 @@ impl Route {
             return;
         }
 
-        if let Self::Empty = self {
-            *self = Self::Divide(Box::new(Self::Empty), Box::new(Self::Empty));
-        }
-        match (self, level_bit(&address, level)) {
+        // if let Self::Empty = self {
+        //     *self = Self::Divide(Box::new(Self::Empty), Box::new(Self::Empty));
+        // }
+        // match (self, level_bit(&address, level)) {
+        //     (Self::Divide(route, _), 0) | (Self::Divide(_, route), 1) => {
+        //         route.insert_level(address, level + 1)
+        //     }
+        //     _ => unreachable!(),
+        // }
+        match (&mut *self, level_bit(&address, level)) {
+            (Self::Empty, _) => *self = Self::Peer(address),
             (Self::Divide(route, _), 0) | (Self::Divide(_, route), 1) => {
                 route.insert_level(address, level + 1)
             }
-            _ => unreachable!(),
+            (Self::Divide(..), _) => unreachable!(),
+            (Self::Peer(other_address), _) => {
+                match level_bit(other_address, level) {
+                    0 => *self = Self::Divide(Box::new(self.clone()), Box::new(Self::Empty)),
+                    1 => *self = Self::Divide(Box::new(Self::Empty), Box::new(self.clone())),
+                    _ => unreachable!(),
+                }
+                // this is not a infinite recursion
+                // in this calling Self::Divide will be matched instead and move on to next level
+                self.insert_level(address, level);
+            }
+        }
+    }
+
+    pub fn depth(&self) -> u32 {
+        match self {
+            Self::Empty | Self::Peer(_) => 1,
+            Self::Divide(route0, route1) => u32::max(route0.depth(), route1.depth()) + 1,
         }
     }
 }

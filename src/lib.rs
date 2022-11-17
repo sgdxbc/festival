@@ -3,12 +3,13 @@ pub mod network;
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap, HashMap},
+    collections::{BTreeMap, BinaryHeap},
 };
 
 use encode::{DecodeContext, FragmentMeta};
 use network::Route;
 use rand::{seq::IteratorRandom, Rng};
+use rustc_hash::FxHashMap;
 
 pub type Thumbnail = [u8; 32];
 pub type FragmentKey = [u8; 32];
@@ -23,17 +24,18 @@ pub struct StorageObject {
 }
 
 pub struct Peer {
-    fragments: HashMap<FragmentKey, FragmentMeta>,
+    fragments: FxHashMap<FragmentKey, FragmentMeta>,
     faulty_deadline: Option<VirtualInstant>,
 }
 
 pub struct System {
     virtual_time: VirtualInstant,
     events: BinaryHeap<(Reverse<VirtualInstant>, SystemEvent)>,
-    peers: HashMap<PeerAddress, Peer>,
+    peers: FxHashMap<PeerAddress, Peer>,
     route: Route,
-    fragment_cache: HashMap<Thumbnail, BTreeMap<u32, PeerAddress>>,
+    fragment_cache: FxHashMap<Thumbnail, BTreeMap<u32, PeerAddress>>,
     config: SystemConfig,
+    stats: SystemStats,
 }
 
 pub struct SystemConfig {
@@ -45,6 +47,12 @@ pub struct SystemConfig {
     pub age_duration: VirtualDuration,
     pub fault_switch_duration: VirtualDuration,
     pub checkpoint_duration: VirtualDuration,
+}
+
+#[derive(Default)]
+struct SystemStats {
+    n_recover: u32,
+    n_fast_recover: u32,
 }
 
 impl Default for SystemConfig {
@@ -72,19 +80,20 @@ pub enum SystemEvent {
 
 impl System {
     pub fn new(rng: &mut impl Rng, config: SystemConfig) -> Self {
-        let mut peers = HashMap::new();
+        let mut peers = FxHashMap::default();
         let mut route = Route::Empty;
         for _ in 0..config.n_peer {
             let address = rng.gen();
             peers.insert(
                 address,
                 Peer {
-                    fragments: HashMap::new(),
+                    fragments: FxHashMap::default(),
                     faulty_deadline: None,
                 },
             );
             route.insert(address);
         }
+        println!("Route depth {}", route.depth());
         let mut system = Self {
             virtual_time: 0,
             events: Default::default(),
@@ -92,6 +101,7 @@ impl System {
             route,
             fragment_cache: Default::default(),
             config,
+            stats: Default::default(),
         };
         system.insert_event(system.config.checkpoint_duration, SystemEvent::Checkpoint);
         for _ in 0..system.config.n_object {
@@ -139,7 +149,7 @@ impl System {
         }
     }
 
-    fn check_object(&self, object: &StorageObject, age: u32) {
+    fn check_object(&mut self, object: &StorageObject, age: u32) {
         let mut fragments = Vec::new();
         for (&index, address) in self.fragment_cache[&object.thumbnail]
             .range(self.config.n_fragment * age..self.config.n_fragment * (age + 1))
@@ -156,11 +166,13 @@ impl System {
             fragments.push(fragment);
         }
         if fragments.len() as u32 >= self.config.object_size * 108 / 100 {
+            self.stats.n_fast_recover += 1;
             return;
         }
         let mut context = DecodeContext::new(object);
         context.push_fragments(fragments.iter());
         assert!(context.is_recovered());
+        self.stats.n_recover += 1;
     }
 
     fn compromise(&mut self, address: &PeerAddress) {
@@ -189,7 +201,10 @@ impl System {
     fn handle_event(&mut self, event: SystemEvent, rng: &mut impl Rng) {
         match event {
             SystemEvent::Checkpoint => {
-                println!("Checkpoint Time {}days", self.virtual_time / 86400);
+                println!("Checkpoint");
+                println!("   Time {}days", self.virtual_time / 86400);
+                println!("   Fast recovery {}", self.stats.n_fast_recover);
+                println!("   Recovery {}", self.stats.n_recover);
                 self.insert_event(self.config.checkpoint_duration, SystemEvent::Checkpoint);
             }
             SystemEvent::Celebrate(object, age) => {
