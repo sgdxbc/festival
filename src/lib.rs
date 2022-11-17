@@ -34,6 +34,7 @@ pub struct System {
     events: BinaryHeap<(Reverse<VirtualInstant>, SystemEvent)>,
 
     n_faulty: u32,
+    object_size: u32,
     n_fragment: u32,
     age_duration: VirtualDuration,
     fault_switch_duration: VirtualDuration,
@@ -80,6 +81,7 @@ impl System {
             events: Default::default(),
 
             n_faulty,
+            object_size,
             n_fragment,
             age_duration,
             fault_switch_duration,
@@ -137,6 +139,9 @@ impl System {
                 fragments.push(fragment);
             }
         }
+        if fragments.len() as u32 >= self.object_size * 108 / 100 {
+            return;
+        }
         let mut context = DecodeContext::new(object);
         context.push_fragments(fragments.iter());
         assert!(context.is_recovered());
@@ -191,7 +196,7 @@ impl System {
         loop {
             let event;
             (Reverse(self.virtual_time), event) = self.events.pop().unwrap();
-            if self.virtual_time >= stop_instant {
+            if self.virtual_time > stop_instant {
                 return;
             }
             self.handle_event(event, rng);
