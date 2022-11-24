@@ -257,6 +257,7 @@ dependencies = [
 name = "festival"
 version = "0.1.0"
 dependencies = [
+ "cmake",
  "plotters",
  "rand",
  "rustc-hash",

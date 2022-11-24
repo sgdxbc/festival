@@ -1,253 +1,205 @@
-pub mod encode;
-pub mod network;
-
 use std::{
-    cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap},
+    ffi::{c_int, c_uint, c_void},
+    marker::{PhantomData, PhantomPinned},
+    ptr::null_mut,
+    sync::Once,
 };
 
-use encode::{DecodeContext, FragmentMeta};
-use network::Route;
-use rand::{seq::IteratorRandom, Rng};
-use rustc_hash::FxHashMap;
-
-pub type Thumbnail = [u8; 32];
-pub type FragmentKey = [u8; 32];
-pub type PeerAddress = [u8; 32];
-pub type VirtualInstant = u32;
-pub type VirtualDuration = u32;
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StorageObject {
-    pub thumbnail: Thumbnail,
-    pub size: u32,
+#[repr(C)]
+pub struct WirehairCodecRaw {
+    _data: [u8; 0],
+    _marker: PhantomData<(*mut u8, PhantomPinned)>,
 }
 
-pub struct Peer {
-    fragments: FxHashMap<FragmentKey, FragmentMeta>,
-    faulty_deadline: Option<VirtualInstant>,
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WirehairResult {
+    Success = 0,
+    NeedMore = 1,
+    InvalidInput = 2,
+    BadDenseSeed = 3,
+    BadPeelSeed = 4,
+    BadInputSmallN = 5,
+    BadInputLargeN = 6,
+    ExtraInsufficient = 7,
+    Error = 8,
+    OutOfMemory = 9,
+    UnsupportedPlatform = 10,
+    // Count
+    Padding = 0x7fffffff,
 }
 
-pub struct System {
-    virtual_time: VirtualInstant,
-    events: BinaryHeap<(Reverse<VirtualInstant>, SystemEvent)>,
-    peers: FxHashMap<PeerAddress, Peer>,
-    route: Route,
-    fragment_cache: FxHashMap<Thumbnail, BTreeMap<u32, PeerAddress>>,
-    config: SystemConfig,
-    stats: SystemStats,
-}
-
-pub struct SystemConfig {
-    pub n_peer: u32,
-    pub n_faulty_peer: u32,
-    pub n_object: u32,
-    pub object_size: u32,
-    pub n_fragment: u32,
-    pub age_duration: VirtualDuration,
-    pub fault_switch_duration: VirtualDuration,
-    pub checkpoint_duration: VirtualDuration,
-}
-
-#[derive(Default)]
-struct SystemStats {
-    n_recover: u32,
-    n_fast_recover: u32,
-}
-
-impl Default for SystemConfig {
-    fn default() -> Self {
-        Self {
-            n_peer: 100000,
-            n_faulty_peer: 10000,
-            n_object: 1,
-            object_size: 5000,
-            n_fragment: 6400,
-            age_duration: 86400,
-            fault_switch_duration: 10 * 86400,
-            checkpoint_duration: 86400,
+impl WirehairResult {
+    pub fn with<T>(self, value: T) -> Result<T, Self> {
+        if self != Self::Success && self != Self::NeedMore {
+            Err(self)
+        } else {
+            Ok(value)
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SystemEvent {
-    Checkpoint,
-    Celebrate(StorageObject, u32),
-    FaultSwitch, //
-    ResetPeer(PeerAddress),
+extern "C" {
+    pub fn wirehair_init_(expected_version: c_int) -> WirehairResult;
+    pub fn wirehair_result_string(result: u32) -> *const u8;
+    pub fn wirehair_encoder_create(
+        reuse_opt: *mut WirehairCodecRaw,
+        message: *const c_void,
+        message_bytes: u64,
+        block_bytes: u32,
+    ) -> *mut WirehairCodecRaw;
+    pub fn wirehair_encode(
+        codec: *mut WirehairCodecRaw,
+        block_id: c_uint,
+        block_data_out: *mut c_void,
+        out_bytes: u32,
+        data_bytes_out: *mut u32,
+    ) -> WirehairResult;
+    pub fn wirehair_decoder_create(
+        reuse_opt: *mut WirehairCodecRaw,
+        message_bytes: u64,
+        block_bytes: u32,
+    ) -> *mut WirehairCodecRaw;
+    pub fn wirehair_decode(
+        codec: *mut WirehairCodecRaw,
+        block_id: c_uint,
+        block_data: *const c_void,
+        data_bytes: u32,
+    ) -> WirehairResult;
+    pub fn wirehair_recover(
+        codec: *mut WirehairCodecRaw,
+        message_out: *mut c_void,
+        message_bytes: u64,
+    ) -> WirehairResult;
+    pub fn wirehair_decoder_become_encoder(codec: *mut WirehairCodecRaw) -> WirehairResult;
+    pub fn wirehair_free(codec: *mut WirehairCodecRaw);
 }
 
-impl System {
-    pub fn new(rng: &mut impl Rng, config: SystemConfig) -> Self {
-        let mut peers = FxHashMap::default();
-        let mut route = Route::Empty;
-        for _ in 0..config.n_peer {
-            let address = rng.gen();
-            peers.insert(
-                address,
-                Peer {
-                    fragments: FxHashMap::default(),
-                    faulty_deadline: None,
-                },
-            );
-            route.insert(address);
-        }
-        println!("Route depth {}", route.depth());
-        let mut system = Self {
-            virtual_time: 0,
-            events: Default::default(),
-            peers,
-            route,
-            fragment_cache: Default::default(),
-            config,
-            stats: Default::default(),
+pub unsafe fn wirehair_init() -> WirehairResult {
+    const WIREHAIR_VERSION: c_int = 2;
+    unsafe { wirehair_init_(WIREHAIR_VERSION) }
+}
+
+pub struct WirehairEncoder {
+    raw: *mut WirehairCodecRaw,
+}
+
+pub struct WirehairDecoder {
+    raw: *mut WirehairCodecRaw,
+    message_bytes: u64,
+    need_more: bool,
+}
+
+static INIT: Once = Once::new();
+impl WirehairEncoder {
+    pub fn new(message: &[u8], block_bytes: u32) -> Self {
+        INIT.call_once(|| unsafe {
+            wirehair_init().with(()).unwrap();
+        });
+        let raw = unsafe {
+            wirehair_encoder_create(
+                null_mut(),
+                message.as_ptr().cast(),
+                message.len() as _,
+                block_bytes,
+            )
         };
-        system.insert_event(system.config.checkpoint_duration, SystemEvent::Checkpoint);
-        for _ in 0..system.config.n_object {
-            let object = StorageObject {
-                thumbnail: rng.gen(),
-                size: system.config.object_size,
-            };
-            system.insert_object(&object, 0);
-            system.insert_event(
-                (0..system.config.age_duration).choose(rng).unwrap(),
-                SystemEvent::Celebrate(object, 1),
-            );
-        }
-        for address in system
-            .peers
-            .keys()
-            .copied()
-            .choose_multiple(rng, system.config.n_faulty_peer as _)
-        {
-            system.compromise(&address);
-        }
-        system.insert_event(
-            system.config.fault_switch_duration,
-            SystemEvent::FaultSwitch,
-        );
-        system
+        assert!(!raw.is_null());
+        Self { raw }
     }
 
-    fn insert_event(&mut self, duration: VirtualDuration, event: SystemEvent) {
-        self.events
-            .push((Reverse(self.virtual_time + duration), event));
+    pub fn encode(&mut self, id: u32, block: &mut [u8]) -> Result<usize, WirehairResult> {
+        let mut out_len = Default::default();
+        unsafe {
+            wirehair_encode(
+                self.raw,
+                id as _,
+                block.as_mut_ptr().cast(),
+                block.len() as _,
+                &mut out_len,
+            )
+        }
+        .with(out_len as _)
     }
+}
 
-    fn insert_object(&mut self, object: &StorageObject, age: u32) {
-        let cache = self.fragment_cache.entry(object.thumbnail).or_default();
-        for index in self.config.n_fragment * age..self.config.n_fragment * (age + 1) {
-            let fragment = FragmentMeta::new(object, index);
-            let key = fragment.key();
-            let address = self.route.find(&key);
-            let peer = self.peers.get_mut(address).unwrap();
-            if peer.faulty_deadline.is_none() {
-                peer.fragments.insert(key, fragment);
-                cache.insert(index, *address);
-            }
+impl WirehairDecoder {
+    pub fn new(message_bytes: u64, block_bytes: u32) -> Self {
+        INIT.call_once(|| unsafe {
+            wirehair_init().with(()).unwrap();
+        });
+        let raw = unsafe { wirehair_decoder_create(null_mut(), message_bytes, block_bytes) };
+        assert!(!raw.is_null());
+        Self {
+            raw,
+            message_bytes,
+            need_more: true,
         }
     }
 
-    fn check_object(&mut self, object: &StorageObject, age: u32) {
-        let mut fragments = Vec::new();
-        for (&index, address) in self.fragment_cache[&object.thumbnail]
-            .range(self.config.n_fragment * age..self.config.n_fragment * (age + 1))
-        {
-            let fragment = FragmentMeta::new(object, index);
-            // let key = fragment.key();
-            // if self.peers[self.route.find(&key)]
-            //     .fragments
-            //     .contains_key(&key)
-            // {
-            //     fragments.push(fragment);
-            // }
-            assert!(self.peers[address].fragments.contains_key(&fragment.key()));
-            fragments.push(fragment);
+    pub fn decode(&mut self, id: u32, block: &[u8]) -> Result<bool, WirehairResult> {
+        if !self.need_more {
+            return Ok(true);
         }
-        if fragments.len() as u32 >= self.config.object_size * 108 / 100 {
-            self.stats.n_fast_recover += 1;
-            return;
-        }
-        let mut context = DecodeContext::new(object);
-        context.push_fragments(fragments.iter());
-        assert!(context.is_recovered());
-        self.stats.n_recover += 1;
+        let result =
+            unsafe { wirehair_decode(self.raw, id as _, block.as_ptr().cast(), block.len() as _) };
+        self.need_more = result == WirehairResult::NeedMore;
+        result.with(result == WirehairResult::Success)
     }
 
-    fn compromise(&mut self, address: &PeerAddress) {
-        let peer = self.peers.get_mut(address).unwrap();
-        if peer.faulty_deadline.is_some() {
-            assert!(peer.fragments.is_empty());
-        }
-        for (_, fragment) in peer.fragments.drain() {
-            // it is ok to have no cache, maybe already cleaned during celebration
-            if let Some(cache_address) = self
-                .fragment_cache
-                .get_mut(&fragment.object_thumbnail)
-                .unwrap()
-                .remove(&fragment.index)
-            {
-                assert_eq!(&cache_address, address);
-            }
-        }
-        peer.faulty_deadline = Some(self.virtual_time + self.config.fault_switch_duration); //
-        self.insert_event(
-            self.config.fault_switch_duration,
-            SystemEvent::ResetPeer(*address),
-        );
+    pub fn recover(&mut self, message: &mut [u8]) -> Result<(), WirehairResult> {
+        assert_eq!(message.len(), self.message_bytes as usize);
+        unsafe { wirehair_recover(self.raw, message.as_mut_ptr().cast(), self.message_bytes) }
+            .with(())
     }
 
-    fn handle_event(&mut self, event: SystemEvent, rng: &mut impl Rng) {
-        match event {
-            SystemEvent::Checkpoint => {
-                println!("Checkpoint");
-                println!("   Time {}days", self.virtual_time / 86400);
-                println!("   Fast recovery {}", self.stats.n_fast_recover);
-                println!("   Recovery {}", self.stats.n_recover);
-                self.insert_event(self.config.checkpoint_duration, SystemEvent::Checkpoint);
-            }
-            SystemEvent::Celebrate(object, age) => {
-                self.check_object(&object, age - 1);
-                self.fragment_cache
-                    .get_mut(&object.thumbnail)
-                    .unwrap()
-                    .clear(); // careful
-                self.insert_object(&object, age);
-                // garbage collection on peers?
-                self.insert_event(
-                    self.config.age_duration,
-                    SystemEvent::Celebrate(object, age + 1),
-                );
-            }
-            SystemEvent::FaultSwitch => {
-                for address in self
-                    .peers
-                    .keys()
-                    .copied()
-                    .choose_multiple(rng, self.config.n_faulty_peer as _)
-                {
-                    self.compromise(&address);
-                }
-                self.insert_event(self.config.fault_switch_duration, SystemEvent::FaultSwitch);
-            }
-            SystemEvent::ResetPeer(address) => {
-                let faulty_deadline = self.peers[&address].faulty_deadline.unwrap();
-                if faulty_deadline <= self.virtual_time {
-                    self.peers.get_mut(&address).unwrap().faulty_deadline = None;
+    pub fn into_encoder(self) -> Result<WirehairEncoder, WirehairResult> {
+        unsafe { wirehair_decoder_become_encoder(self.raw) }.with(WirehairEncoder { raw: self.raw })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ptr::null_mut;
+
+    use rand::{random, thread_rng, Rng};
+
+    use crate::{
+        wirehair_encoder_create, wirehair_free, wirehair_init, WirehairDecoder, WirehairEncoder,
+        WirehairResult,
+    };
+
+    #[test]
+    fn it_works() {
+        let result = unsafe { wirehair_init() };
+        assert_eq!(result, WirehairResult::Success);
+        let message = "Hello, world!".as_bytes();
+        let codec = unsafe {
+            wirehair_encoder_create(null_mut(), message.as_ptr().cast(), message.len() as _, 4)
+        };
+        assert!(!codec.is_null());
+        unsafe { wirehair_free(codec) }
+    }
+
+    #[test]
+    fn it_works_in_rust() {
+        let k = 256;
+        let block_bytes = 1024;
+        let mut message = vec![0; (k * block_bytes) as _];
+
+        for _ in 0..100 {
+            thread_rng().fill(&mut message[..]);
+            let mut encoder = WirehairEncoder::new(&message, block_bytes);
+            let mut decoder = WirehairDecoder::new(message.len() as _, block_bytes);
+            for i in 0.. {
+                let mut block = vec![0; block_bytes as _];
+                let id = random();
+                encoder.encode(id, &mut block).unwrap();
+                if decoder.decode(id, &block).unwrap() {
+                    assert!(i <= k + 2);
+                    break;
                 }
             }
-        }
-    }
-
-    pub fn run(&mut self, rng: &mut impl Rng, stop_instant: VirtualInstant) {
-        loop {
-            let event;
-            (Reverse(self.virtual_time), event) = self.events.pop().unwrap();
-            if self.virtual_time > stop_instant {
-                return;
-            }
-            self.handle_event(event, rng);
         }
     }
 }
