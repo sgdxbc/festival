@@ -102,13 +102,13 @@ impl DecodeContext {
             loop {
                 let mut recovered_blocks = HashSet::new();
                 self.pending_blocks.retain(|&block| {
-                    let recovered = !self.recovered_composites.contains(&block)
-                        && !block_choose_auxiliary(self.size, block)
+                    let recovered = self.recovered_composites.contains(&block)
+                        || block_choose_auxiliary(self.size, block)
                             .all(|composite| self.recovered_composites.contains(&composite));
                     if recovered {
                         recovered_blocks.insert(block);
                     }
-                    recovered
+                    !recovered
                 });
                 if recovered_blocks.is_empty() {
                     break;
@@ -138,7 +138,7 @@ mod tests {
             thumbnail: [0; 32],
             size,
         };
-        let composites = (0..size + 400)
+        let composites = (0..size + 500)
             .map(|index| {
                 FragmentMeta::new(&object, index)
                     .choose_composite()

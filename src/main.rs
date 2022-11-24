@@ -7,7 +7,7 @@ fn main() {
         &mut rng,
         SystemConfig {
             n_fragment: 6800,
-            n_object: 100,
+            // n_object: 100,
             // checkpoint_duration: 7 * 86400,
             ..Default::default()
         },

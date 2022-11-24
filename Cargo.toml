@@ -9,3 +9,6 @@ debug = 1
 [dependencies]
 rand = "0.8.5"
 rustc-hash = "1.1.0"
+
+[dev-dependencies]
+plotters = "0.3.4"

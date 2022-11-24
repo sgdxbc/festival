@@ -19,8 +19,8 @@ pub type VirtualDuration = u32;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StorageObject {
-    thumbnail: Thumbnail,
-    size: u32,
+    pub thumbnail: Thumbnail,
+    pub size: u32,
 }
 
 pub struct Peer {
@@ -60,7 +60,7 @@ impl Default for SystemConfig {
         Self {
             n_peer: 100000,
             n_faulty_peer: 10000,
-            n_object: 10,
+            n_object: 1,
             object_size: 5000,
             n_fragment: 6400,
             age_duration: 86400,
