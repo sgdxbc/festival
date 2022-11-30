@@ -5,6 +5,7 @@ edition = "2021"
 
 [profile.release]
 debug = 1
+lto = true
 
 [dependencies]
 rand = { version = "0.8.5", features = ["small_rng"] }
