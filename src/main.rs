@@ -1,6 +1,9 @@
 use std::env;
 
-use festival::{ProtocolConfig::Festival, System, SystemConfig};
+use festival::{
+    ProtocolConfig::{Festival, Kademlia},
+    System, SystemConfig,
+};
 use rand::{rngs::SmallRng, SeedableRng};
 
 fn main() {
@@ -12,15 +15,19 @@ fn main() {
     let mut system = System::new(
         rng,
         SystemConfig {
-            n_peer: 10000,
+            n_peer: 20000,
             failure_rate: 10. * 86400.,
             n_object: 1,
-            protocol: Festival {
-                n_peer_per_age: 50,
-                k: 256,
-                k_repair: 300,
-                check_celebration_sec: 86400,
-                gossip_sec: 6 * 3600,
+            // protocol: Festival {
+            //     n_peer_per_age: 26,
+            //     k: 256,
+            //     k_repair: 300,
+            //     check_celebration_sec: 86400,
+            //     gossip_sec: 6 * 3600,
+            // },
+            protocol: Kademlia {
+                n: 20,
+                republish_sec: 3600,
             },
         },
     );
