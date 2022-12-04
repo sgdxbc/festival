@@ -3,14 +3,14 @@ name = "festival"
 version = "0.1.0"
 edition = "2021"
 
-[profile.release]
-debug = 1
-lto = true
-
 [dependencies]
+env_logger = "0.10.0"
+futures = "0.3.25"
+libp2p = { version = "0.50.0", features = ["full"] }
 rand = { version = "0.8.5", features = ["small_rng"] }
 rand_distr = "0.4.3"
 rustc-hash = "1.1.0"
+tokio = { version = "1.22.0", features = ["full"] }
 
 [dev-dependencies]
 plotters = "0.3.4"
