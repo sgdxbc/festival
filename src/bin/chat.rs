@@ -3,8 +3,8 @@ use libp2p::{
     core::upgrade,
     floodsub::{self, Floodsub, FloodsubEvent},
     identity, mdns, mplex, noise,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, Multiaddr, PeerId, Transport,
+    swarm::{ConnectionHandler, IntoConnectionHandler, NetworkBehaviour, SwarmEvent},
+    tcp, Multiaddr, PeerId, Swarm, Transport,
 };
 use std::error::Error;
 use tokio::io::{self, AsyncBufReadExt};
@@ -70,37 +70,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let line = line?.expect("stdin closed");
                 swarm.behaviour_mut().floodsub.publish(floodsub_topic.clone(), line.as_bytes());
             }
-            event = swarm.select_next_some() => {
-                match event {
-                    SwarmEvent::NewListenAddr { address, .. } => {
-                        println!("Listening on {address:?}");
+            event = swarm.select_next_some() => handle_event(&mut swarm, event),
+        }
+    }
+
+    fn handle_event(
+        swarm: &mut Swarm<MyBehaviour>,
+        event: SwarmEvent<<MyBehaviour as NetworkBehaviour>::OutEvent,
+        <<<MyBehaviour as NetworkBehaviour>::ConnectionHandler as IntoConnectionHandler>::Handler
+        as ConnectionHandler>::Error>,
+    ) {
+        match event {
+            SwarmEvent::NewListenAddr { address, .. } => {
+                println!("Listening on {address:?}");
+            }
+            SwarmEvent::Behaviour(MyBehaviourEvent::Floodsub(FloodsubEvent::Message(message))) => {
+                println!(
+                    "Received: '{:?}' from {:?}",
+                    String::from_utf8_lossy(&message.data),
+                    message.source
+                );
+            }
+            SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(event)) => match event {
+                mdns::Event::Discovered(list) => {
+                    for (peer, _) in list {
+                        swarm
+                            .behaviour_mut()
+                            .floodsub
+                            .add_node_to_partial_view(peer);
                     }
-                    SwarmEvent::Behaviour(MyBehaviourEvent::Floodsub(FloodsubEvent::Message(message))) => {
-                        println!(
-                                "Received: '{:?}' from {:?}",
-                                String::from_utf8_lossy(&message.data),
-                                message.source
-                            );
-                    }
-                    SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(event)) => {
-                        match event {
-                            mdns::Event::Discovered(list) => {
-                                for (peer, _) in list {
-                                    swarm.behaviour_mut().floodsub.add_node_to_partial_view(peer);
-                                }
-                            }
-                            mdns::Event::Expired(list) => {
-                                for (peer, _) in list {
-                                    if !swarm.behaviour().mdns.has_node(&peer) {
-                                        swarm.behaviour_mut().floodsub.remove_node_from_partial_view(&peer);
-                                    }
-                                }
-                            }
+                }
+                mdns::Event::Expired(list) => {
+                    for (peer, _) in list {
+                        if !swarm.behaviour().mdns.has_node(&peer) {
+                            swarm
+                                .behaviour_mut()
+                                .floodsub
+                                .remove_node_from_partial_view(&peer);
                         }
                     }
-                    _ => {}
                 }
-            }
+            },
+            _ => {}
         }
     }
 }
