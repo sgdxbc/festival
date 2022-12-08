@@ -60,7 +60,7 @@ pub struct KadPeer {
 }
 
 impl KadPeer {
-    pub fn with_random_identity() -> Self {
+    pub fn random_identity() -> Self {
         let id_keys = identity::Keypair::generate_ed25519();
         let peer_id = PeerId::from(id_keys.public());
         let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))

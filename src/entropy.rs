@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use bincode::Options;
+use futures::StreamExt;
 use libp2p::{
     core::upgrade::Version,
     gossipsub::{
@@ -14,10 +15,11 @@ use libp2p::{
     request_response::{
         ProtocolSupport, RequestResponse, RequestResponseEvent, RequestResponseMessage,
     },
-    swarm::NetworkBehaviour,
+    swarm::{NetworkBehaviour, SwarmEvent},
     tcp, PeerId, Swarm, Transport,
 };
 use tokio::{
+    select,
     sync::{mpsc, oneshot},
     task::spawn_blocking,
 };
@@ -64,7 +66,7 @@ struct WaitGet {
 }
 
 impl EntropyPeer {
-    pub fn with_random_identity(n_peer: usize) -> Self {
+    pub fn random_identity(n_peer: usize) -> Self {
         let id_keys = identity::Keypair::generate_ed25519();
         let peer_id = PeerId::from(id_keys.public());
         let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
@@ -137,7 +139,7 @@ impl EntropyPeer {
         });
     }
 
-    async fn get(&mut self, id: [u8; 32], wait_get: oneshot::Sender<Vec<u8>>) {
+    fn get(&mut self, id: [u8; 32], wait_get: oneshot::Sender<Vec<u8>>) {
         assert!(self.wait_get.is_none());
         // GET step 1: gossip GET
         self.swarm
@@ -236,7 +238,70 @@ impl EntropyPeer {
                     wait_put.sender.send(wait_put.id).unwrap()
                 }
             }
+            Event::Gossip(GossipsubEvent::Message {
+                message:
+                    GossipsubMessage {
+                        source: Some(peer),
+                        topic,
+                        data,
+                        ..
+                    },
+                ..
+            }) if topic.as_str() == "get" => {
+                // GET step 2: push fragment
+                if let Some((id, frag_id, frag)) = self.fragments.as_ref() {
+                    if <[u8; 32]>::try_from(data).unwrap() == *id {
+                        self.swarm.behaviour_mut().exchange.send_request(
+                            &peer,
+                            FileRequest::PushFrag(*id, *frag_id, frag.clone()),
+                        );
+                    }
+                }
+            }
+            Event::Exchange(RequestResponseEvent::Message {
+                message:
+                    RequestResponseMessage::Request {
+                        request: FileRequest::PushFrag(id, frag_id, frag),
+                        channel,
+                        ..
+                    },
+                ..
+            }) if self.wait_get.as_ref().map(|wait_get| wait_get.id) == Some(id) => {
+                // not rery meaningful by now
+                self.swarm
+                    .behaviour_mut()
+                    .exchange
+                    .send_response(channel, FileResponse::PushFragOk)
+                    .unwrap();
+                // GET step 3: collect push fragment
+                let Some(wait_get) = self.wait_get.as_mut() else {unreachable!()};
+                if wait_get.decoder.decode(frag_id, &frag).unwrap() {
+                    let mut wait_get = self.wait_get.take().unwrap();
+                    let mut object = vec![0; wait_get.decoder.message_bytes as _];
+                    wait_get.decoder.recover(&mut object).unwrap();
+                    wait_get.sender.send(object).unwrap();
+                }
+            }
             event => info!("{event:?}"),
+        }
+    }
+
+    pub async fn run_event_loop(&mut self) {
+        loop {
+            select! {
+                command = self.command.recv() => self.handle_command(command.unwrap()).await,
+                event = self.swarm.select_next_some() => match event {
+                    SwarmEvent::Behaviour(event) => self.handle_event(event).await,
+                    event => info!("{event:?}"),
+                }
+            }
+        }
+    }
+
+    async fn handle_command(&mut self, command: Command) {
+        match command {
+            Command::Put(object, wait_put) => self.put(object, wait_put).await,
+            Command::Get(id, wait_get) => self.get(id, wait_get),
         }
     }
 }

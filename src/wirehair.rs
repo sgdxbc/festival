@@ -84,13 +84,17 @@ pub struct WirehairEncoder {
     raw: *mut WirehairCodecRaw,
     pub block_bytes: u32,
 }
+unsafe impl Send for WirehairEncoder {} // really?
+unsafe impl Sync for WirehairEncoder {}
 
 pub struct WirehairDecoder {
     raw: *mut WirehairCodecRaw,
-    message_bytes: u64,
+    pub message_bytes: u64,
     block_bytes: u32,
     need_more: bool,
 }
+unsafe impl Send for WirehairDecoder {}
+unsafe impl Sync for WirehairDecoder {}
 
 static INIT: Once = Once::new();
 impl WirehairEncoder {

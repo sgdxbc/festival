@@ -1,9 +1,10 @@
 use std::{env::args, time::Duration};
 
-use festival::KadPeer;
+use festival::{peer::PeerHandle, EntropyPeer, KadPeer};
 use rand::{thread_rng, Rng};
 use tokio::{
     spawn,
+    task::JoinHandle,
     time::{sleep, Instant},
 };
 use tracing::{info, Level};
@@ -18,24 +19,21 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    match args().nth(1).as_deref() {
-        None => KadPeer::with_random_identity().run_event_loop().await,
-        Some("putget") => {
+    match (args().nth(1).as_deref(), args().nth(2).as_deref()) {
+        (Some("entropy"), None) => EntropyPeer::random_identity(1000).run_event_loop().await,
+        (Some("kad"), None) => KadPeer::random_identity().run_event_loop().await,
+        (Some(protocol), Some("putget")) => {
             let mut object = vec![0; 1 << 30];
             thread_rng().fill(&mut object[..]);
 
-            let mut peer = KadPeer::with_random_identity();
-            let handle = peer.handle();
-            let peer_thread = spawn(async move { peer.run_event_loop().await });
+            let (handle, peer_thread) = opertion_peer(protocol);
             sleep(Duration::from_secs(1)).await;
             let instant = Instant::now();
             let id = handle.put(object.clone()).await;
             info!("{:.2?} Put done", Instant::now() - instant);
             peer_thread.abort();
 
-            let mut peer = KadPeer::with_random_identity();
-            let handle = peer.handle();
-            let peer_thread = spawn(async move { peer.run_event_loop().await });
+            let (handle, peer_thread) = opertion_peer(protocol);
             sleep(Duration::from_secs(1)).await;
             let instant = Instant::now();
             let object_ = handle.get(id).await;
@@ -44,5 +42,25 @@ async fn main() {
             assert_eq!(object_, object);
         }
         _ => panic!(),
+    }
+}
+
+fn opertion_peer(protocol: &str) -> (PeerHandle, JoinHandle<()>) {
+    match protocol {
+        "kad" => {
+            let mut peer = KadPeer::random_identity();
+            (
+                peer.handle(),
+                spawn(async move { peer.run_event_loop().await }),
+            )
+        }
+        "entropy" => {
+            let mut peer = EntropyPeer::random_identity(1000);
+            (
+                peer.handle(),
+                spawn(async move { peer.run_event_loop().await }),
+            )
+        }
+        _ => unreachable!(),
     }
 }
