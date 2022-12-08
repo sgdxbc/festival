@@ -1,11 +1,10 @@
-use std::{collections::HashMap, io};
+use std::{collections::HashMap, io, mem::take};
 
 use async_trait::async_trait;
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
+use bincode::Options;
+use futures::{AsyncRead, AsyncWrite, StreamExt};
 use libp2p::{
-    core::upgrade::{
-        read_length_prefixed, read_varint, write_length_prefixed, write_varint, Version,
-    },
+    core::upgrade::{read_length_prefixed, write_length_prefixed, Version},
     identity,
     kad::{
         record::Key, store::MemoryStore, GetProvidersOk, Kademlia, KademliaConfig, KademliaEvent,
@@ -22,6 +21,7 @@ use libp2p::{
     tcp, PeerId, Swarm, Transport,
 };
 use rand::{seq::SliceRandom, thread_rng};
+use serde::{Deserialize, Serialize};
 use tokio::{
     select,
     sync::{mpsc, oneshot},
@@ -40,11 +40,13 @@ pub struct KadFs {
     peers: Vec<PeerId>,
     wait_put: Option<oneshot::Sender<()>>,
     wait_get: Option<oneshot::Sender<Vec<u8>>>,
-    objects: HashMap<[u8; 32], Vec<u8>>,
+    objects: Option<([u8; 32], Vec<u8>)>,
     // StartProviding query => response channel
     push_peers: HashMap<QueryId, ResponseChannel<FileResponse>>,
     command: mpsc::Receiver<Command>,
     command_sender: mpsc::Sender<Command>,
+    // on client side whether a pull request is already sent to a provider
+    is_pulling: bool,
 }
 
 impl KadFs {
@@ -85,9 +87,10 @@ impl KadFs {
             wait_put: None,
             wait_get: None,
             push_peers: Default::default(),
-            objects: Default::default(),
+            objects: None,
             command,
             command_sender,
+            is_pulling: false,
         }
     }
 
@@ -126,6 +129,14 @@ impl KadFs {
                     self.swarm.behaviour_mut().kademlia.add_address(&peer, addr);
                 }
             }
+            Event::Mdns(mdns::Event::Expired(list)) => {
+                for (peer, addr) in list {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .remove_address(&peer, &addr);
+                }
+            }
             Event::Kademlia(KademliaEvent::OutboundQueryProgressed {
                 id,
                 result: QueryResult::StartProviding(Ok(_)),
@@ -143,13 +154,14 @@ impl KadFs {
                 result:
                     QueryResult::GetProviders(Ok(GetProvidersOk::FoundProviders { key, providers })),
                 ..
-            }) => {
+            }) if !self.is_pulling => {
                 assert!(self.wait_get.is_some());
                 // GET step 2: pull object
                 self.swarm.behaviour_mut().exchange.send_request(
                     &providers.into_iter().next().unwrap(),
                     FileRequest::Pull(key.to_vec().try_into().unwrap()),
                 );
+                self.is_pulling = true;
             }
             Event::Exchange(RequestResponseEvent::Message {
                 message:
@@ -161,7 +173,7 @@ impl KadFs {
                 ..
             }) => {
                 // PUT step 2: insert object and publish provider record
-                self.objects.insert(id, object);
+                self.objects = Some((id, object));
                 let query_id = self
                     .swarm
                     .behaviour_mut()
@@ -180,11 +192,15 @@ impl KadFs {
                 ..
             }) => {
                 // GET step 3: response pulling
-                self.swarm
-                    .behaviour_mut()
-                    .exchange
-                    .send_response(channel, FileResponse::PullOk(self.objects[&id].clone()))
-                    .unwrap()
+                if let Some((object_id, object)) = &self.objects {
+                    if id == *object_id {
+                        self.swarm
+                            .behaviour_mut()
+                            .exchange
+                            .send_response(channel, FileResponse::PullOk(object.clone()))
+                            .unwrap()
+                    }
+                }
             }
             Event::Exchange(RequestResponseEvent::Message {
                 message:
@@ -263,12 +279,12 @@ impl KadFs {
 pub struct FileExchangeProtocol;
 #[derive(Debug, Clone, Copy)]
 pub struct FileExchangeCodec;
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FileRequest {
     Push([u8; 32], Vec<u8>),
     Pull([u8; 32]),
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FileResponse {
     PushOk,
     PullOk(Vec<u8>),
@@ -291,22 +307,13 @@ impl RequestResponseCodec for FileExchangeCodec {
         _: &Self::Protocol,
         io: &mut T,
     ) -> io::Result<Self::Request> {
-        match read_varint(io).await {
-            Ok(0) => {
-                let mut id = [0; 32];
-                io.read_exact(&mut id[..]).await.unwrap();
-                Ok(FileRequest::Push(
-                    id,
-                    read_length_prefixed(io, 2 << 30).await.unwrap(),
-                ))
-            }
-            Ok(1) => {
-                let mut id = [0; 32];
-                io.read_exact(&mut id[..]).await.unwrap();
-                Ok(FileRequest::Pull(id))
-            }
-            _ => unreachable!(),
+        let mut request = bincode::options()
+            .deserialize(&read_length_prefixed(io, 1024).await.unwrap())
+            .unwrap();
+        if let FileRequest::Push(_, object) = &mut request {
+            *object = read_length_prefixed(io, 2 << 30).await.unwrap()
         }
+        Ok(request)
     }
 
     async fn read_response<T: AsyncRead + Unpin + Send>(
@@ -314,31 +321,32 @@ impl RequestResponseCodec for FileExchangeCodec {
         _: &Self::Protocol,
         io: &mut T,
     ) -> io::Result<Self::Response> {
-        match read_varint(io).await {
-            Ok(0) => Ok(FileResponse::PushOk),
-            Ok(1) => Ok(FileResponse::PullOk(
-                read_length_prefixed(io, 2 << 30).await.unwrap(),
-            )),
-            _ => unreachable!(),
+        let mut response = bincode::options()
+            .deserialize(&read_length_prefixed(io, 1024).await.unwrap())
+            .unwrap();
+        if let FileResponse::PullOk(object) = &mut response {
+            *object = read_length_prefixed(io, 2 << 30).await.unwrap()
         }
+        Ok(response)
     }
 
     async fn write_request<T: AsyncWrite + Unpin + Send>(
         &mut self,
         _: &Self::Protocol,
         io: &mut T,
-        data: Self::Request,
+        mut data: Self::Request,
     ) -> io::Result<()> {
-        match data {
-            FileRequest::Push(id, object) => {
-                write_varint(io, 0).await.unwrap();
-                io.write_all(&id).await.unwrap();
-                write_length_prefixed(io, object).await.unwrap();
+        match &mut data {
+            FileRequest::Push(_, object) => {
+                let object = take(object);
+                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap())
+                    .await
+                    .unwrap();
+                write_length_prefixed(io, object).await.unwrap()
             }
-            FileRequest::Pull(id) => {
-                write_varint(io, 1).await.unwrap();
-                io.write_all(&id).await.unwrap();
-            }
+            data => write_length_prefixed(io, &bincode::options().serialize(data).unwrap())
+                .await
+                .unwrap(),
         }
         Ok(())
     }
@@ -347,14 +355,19 @@ impl RequestResponseCodec for FileExchangeCodec {
         &mut self,
         _: &Self::Protocol,
         io: &mut T,
-        data: Self::Response,
+        mut data: Self::Response,
     ) -> io::Result<()> {
-        match data {
-            FileResponse::PushOk => write_varint(io, 0).await.unwrap(),
+        match &mut data {
             FileResponse::PullOk(object) => {
-                write_varint(io, 1).await.unwrap();
-                write_length_prefixed(io, object).await.unwrap();
+                let object = take(object);
+                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap())
+                    .await
+                    .unwrap();
+                write_length_prefixed(io, object).await.unwrap()
             }
+            data => write_length_prefixed(io, &bincode::options().serialize(data).unwrap())
+                .await
+                .unwrap(),
         }
         Ok(())
     }
