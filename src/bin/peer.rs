@@ -1,6 +1,6 @@
 use std::{env::args, time::Duration};
 
-use festival::kad::KadFs;
+use festival::KadPeer;
 use rand::{thread_rng, Rng};
 use tokio::{
     spawn,
@@ -19,12 +19,12 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
     match args().nth(1).as_deref() {
-        None => KadFs::new().run_event_loop().await,
+        None => KadPeer::with_random_identity().run_event_loop().await,
         Some("putget") => {
             let mut object = vec![0; 1 << 30];
             thread_rng().fill(&mut object[..]);
 
-            let mut peer = KadFs::new();
+            let mut peer = KadPeer::with_random_identity();
             let handle = peer.handle();
             let peer_thread = spawn(async move { peer.run_event_loop().await });
             sleep(Duration::from_secs(1)).await;
@@ -33,7 +33,7 @@ async fn main() {
             info!("{:.2?} Put done", Instant::now() - instant);
             peer_thread.abort();
 
-            let mut peer = KadFs::new();
+            let mut peer = KadPeer::with_random_identity();
             let handle = peer.handle();
             let peer_thread = spawn(async move { peer.run_event_loop().await });
             sleep(Duration::from_secs(1)).await;

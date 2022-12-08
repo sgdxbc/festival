@@ -32,29 +32,35 @@ use crate::peer::{
 };
 
 #[derive(NetworkBehaviour)]
-pub struct KadFsBehaviour {
+pub struct KadBehaviour {
     kademlia: Kademlia<MemoryStore>,
     exchange: RequestResponse<FileExchangeCodec>,
     mdns: mdns::tokio::Behaviour,
 }
-type Event = <KadFsBehaviour as NetworkBehaviour>::OutEvent;
+type Event = <KadBehaviour as NetworkBehaviour>::OutEvent;
 
-pub struct KadFs {
-    swarm: Swarm<KadFsBehaviour>,
+pub struct KadPeer {
+    swarm: Swarm<KadBehaviour>,
+
+    // active peer (client side) state
     peers: Vec<PeerId>,
     wait_put: Option<oneshot::Sender<[u8; 32]>>,
     wait_get: Option<oneshot::Sender<Vec<u8>>>,
+    // whether a pull request is already sent to a provider
+    is_pulling: bool,
+    command: mpsc::Receiver<Command>,
+    command_sender: mpsc::Sender<Command>,
+
+    // passive peer state
+    // 1-capacity store, equivalent to a real store with strict eviction rule
+    // there's no concurrent storing, so there's no false positive eviction
     objects: Option<([u8; 32], Vec<u8>)>,
     // StartProviding query => response channel
     push_peers: HashMap<QueryId, ResponseChannel<FileResponse>>,
-    command: mpsc::Receiver<Command>,
-    command_sender: mpsc::Sender<Command>,
-    // on client side whether a pull request is already sent to a provider
-    is_pulling: bool,
 }
 
-impl KadFs {
-    pub fn new() -> Self {
+impl KadPeer {
+    pub fn with_random_identity() -> Self {
         let id_keys = identity::Keypair::generate_ed25519();
         let peer_id = PeerId::from(id_keys.public());
         let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
@@ -74,7 +80,7 @@ impl KadFs {
         );
         let mut swarm = Swarm::with_tokio_executor(
             transport,
-            KadFsBehaviour {
+            KadBehaviour {
                 kademlia,
                 exchange,
                 mdns: mdns::Behaviour::new(Default::default()).unwrap(),

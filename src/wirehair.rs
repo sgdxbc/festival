@@ -75,18 +75,20 @@ extern "C" {
     pub fn wirehair_free(codec: *mut WirehairCodecRaw);
 }
 
-pub unsafe fn wirehair_init() -> WirehairResult {
+unsafe fn wirehair_init() -> WirehairResult {
     const WIREHAIR_VERSION: c_int = 2;
     unsafe { wirehair_init_(WIREHAIR_VERSION) }
 }
 
 pub struct WirehairEncoder {
     raw: *mut WirehairCodecRaw,
+    pub block_bytes: u32,
 }
 
 pub struct WirehairDecoder {
     raw: *mut WirehairCodecRaw,
     message_bytes: u64,
+    block_bytes: u32,
     need_more: bool,
 }
 
@@ -105,10 +107,11 @@ impl WirehairEncoder {
             )
         };
         assert!(!raw.is_null());
-        Self { raw }
+        Self { raw, block_bytes }
     }
 
     pub fn encode(&mut self, id: u32, block: &mut [u8]) -> Result<usize, WirehairResult> {
+        assert!(block.len() >= self.block_bytes as _);
         let mut out_len = Default::default();
         unsafe {
             wirehair_encode(
@@ -133,6 +136,7 @@ impl WirehairDecoder {
         Self {
             raw,
             message_bytes,
+            block_bytes,
             need_more: true,
         }
     }
@@ -154,7 +158,10 @@ impl WirehairDecoder {
     }
 
     pub fn into_encoder(self) -> Result<WirehairEncoder, WirehairResult> {
-        unsafe { wirehair_decoder_become_encoder(self.raw) }.with(WirehairEncoder { raw: self.raw })
+        unsafe { wirehair_decoder_become_encoder(self.raw) }.with(WirehairEncoder {
+            raw: self.raw,
+            block_bytes: self.block_bytes,
+        })
     }
 }
 

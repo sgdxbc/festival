@@ -196,7 +196,7 @@ impl<R: Rng> System<R> {
             }
             if let Some(alive_peers) = peer2.eligible_objects.get_mut(&object_id) {
                 alive_peers.insert(peer_id, age);
-            } else if let Some(_) = Self::eligible(peer2_id, object_id, age + 1, &self.config) {
+            } else if let Some(_i) = Self::eligible(peer2_id, object_id, age + 1, &self.config) {
                 // println!(
                 //     "{:02x?} {:8} start tracking for age {}",
                 //     &peer2_id[..4],

@@ -39,11 +39,13 @@ pub struct FileExchangeCodec;
 pub enum FileRequest {
     Push(Vec<u8>),
     Pull([u8; 32]),
+    PullFrag([u8; 32], u32), // append proof from VRF
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FileResponse {
     PushOk([u8; 32]),
     PullOk(Vec<u8>),
+    PullFragOk([u8; 32], u32, Vec<u8>),
 }
 
 impl ProtocolName for FileExchangeProtocol {
