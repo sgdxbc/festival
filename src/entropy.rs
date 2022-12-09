@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use bincode::Options;
 use futures::StreamExt;
@@ -18,6 +21,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, PeerId, Swarm, Transport,
 };
+use rand::random;
 use tokio::{
     select,
     sync::{mpsc, oneshot},
@@ -43,6 +47,10 @@ type Event = <EntropyBehaviour as NetworkBehaviour>::OutEvent;
 pub struct EntropyPeer {
     swarm: Swarm<EntropyBehaviour>,
     n_peer: usize,
+    k: usize,
+    // k_repair: usize,
+    k_put: usize, // with high probability, the min number of honest peers per epoch
+    k_select: usize,
 
     command_sender: mpsc::Sender<Command>,
     command: mpsc::Receiver<Command>,
@@ -55,18 +63,18 @@ pub struct EntropyPeer {
 struct WaitPut {
     sender: oneshot::Sender<[u8; 32]>,
     id: [u8; 32],
-    encoder: WirehairEncoder,
+    encoder: Arc<Mutex<WirehairEncoder>>,
     show_peers: HashSet<PeerId>,
 }
 
 struct WaitGet {
     sender: oneshot::Sender<Vec<u8>>,
     id: [u8; 32],
-    decoder: WirehairDecoder,
+    decoder: Arc<Mutex<WirehairDecoder>>,
 }
 
 impl EntropyPeer {
-    pub fn random_identity(n_peer: usize) -> Self {
+    pub fn random_identity(n_peer: usize, k: usize) -> Self {
         let id_keys = identity::Keypair::generate_ed25519();
         let peer_id = PeerId::from(id_keys.public());
         let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
@@ -103,6 +111,9 @@ impl EntropyPeer {
         Self {
             swarm,
             n_peer,
+            k,
+            k_put: k * 8 / 5,
+            k_select: k * 2, //
             command,
             command_sender,
             wait_put: None,
@@ -134,7 +145,10 @@ impl EntropyPeer {
         self.wait_put = Some(WaitPut {
             sender: wait_put,
             id,
-            encoder: WirehairEncoder::new(&object, (object.len() / 16) as _),
+            encoder: Arc::new(Mutex::new(WirehairEncoder::new(
+                &object,
+                (object.len() / self.k) as _,
+            ))),
             show_peers: Default::default(),
         });
     }
@@ -150,7 +164,7 @@ impl EntropyPeer {
         self.wait_get = Some(WaitGet {
             sender: wait_get,
             id,
-            decoder: WirehairDecoder::new(1 << 30, (1 << 30) / 16),
+            decoder: Arc::new(Mutex::new(WirehairDecoder::new(1 << 30, (1 << 30) / 16))),
         })
     }
 
@@ -166,8 +180,15 @@ impl EntropyPeer {
                     },
                 ..
             }) if topic.as_str() == "put" => {
-                // TODO if not selected abort
-                let Some(frag_id) = Some(0) else {return};
+                // select with probability k/N
+                // first generate a random number uniformly in [0, N/k)
+                // if it is inside [0, 1), further scale it to [0, u32::MAX) as final frag id
+                let frag_id = random::<f32>() / (self.k_select as f32 / self.n_peer as f32);
+                let frag_id = if frag_id > 1. {
+                    return;
+                } else {
+                    (frag_id * u32::MAX as f32) as _
+                };
                 // PUT step 2: pull fragment
                 self.swarm.behaviour_mut().exchange.send_request(
                     &peer,
@@ -184,9 +205,13 @@ impl EntropyPeer {
                 ..
             }) if self.wait_put.as_ref().map(|wait_put| wait_put.id) == Some(id) => {
                 // PUT step 3: response pull fragment
-                let Some(wait_put) = self.wait_put.as_mut() else {unreachable!()};
-                let mut frag = vec![0; wait_put.encoder.block_bytes as _];
-                wait_put.encoder.encode(frag_id, &mut frag).unwrap();
+                let Some(wait_put) = self.wait_put.as_mut() else {
+                    // already responded `k_put` peers and finialize put
+                    return; // is it ok to never respond?
+                };
+                let mut encoder = wait_put.encoder.lock().unwrap();
+                let mut frag = vec![0; encoder.block_bytes as _];
+                encoder.encode(frag_id, &mut frag).unwrap();
                 self.swarm
                     .behaviour_mut()
                     .exchange
@@ -233,7 +258,7 @@ impl EntropyPeer {
                     return;
                 }
                 wait_put.show_peers.insert(peer);
-                if wait_put.show_peers.len() >= 24 {
+                if wait_put.show_peers.len() >= self.k_put {
                     let wait_put = self.wait_put.take().unwrap();
                     wait_put.sender.send(wait_put.id).unwrap()
                 }
@@ -275,10 +300,12 @@ impl EntropyPeer {
                     .unwrap();
                 // GET step 3: collect push fragment
                 let Some(wait_get) = self.wait_get.as_mut() else {unreachable!()};
-                if wait_get.decoder.decode(frag_id, &frag).unwrap() {
-                    let mut wait_get = self.wait_get.take().unwrap();
-                    let mut object = vec![0; wait_get.decoder.message_bytes as _];
-                    wait_get.decoder.recover(&mut object).unwrap();
+                let mut decoder = wait_get.decoder.lock().unwrap();
+                if decoder.decode(frag_id, &frag).unwrap() {
+                    let mut object = vec![0; decoder.message_bytes as _];
+                    decoder.recover(&mut object).unwrap();
+                    drop(decoder);
+                    let wait_get = self.wait_get.take().unwrap();
                     wait_get.sender.send(object).unwrap();
                 }
             }

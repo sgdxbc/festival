@@ -85,7 +85,8 @@ pub struct WirehairEncoder {
     pub block_bytes: u32,
 }
 unsafe impl Send for WirehairEncoder {} // really?
-unsafe impl Sync for WirehairEncoder {}
+
+// not sure whether underlying object is `Sync` or not so let's play safe
 
 pub struct WirehairDecoder {
     raw: *mut WirehairCodecRaw,
@@ -94,7 +95,6 @@ pub struct WirehairDecoder {
     need_more: bool,
 }
 unsafe impl Send for WirehairDecoder {}
-unsafe impl Sync for WirehairDecoder {}
 
 static INIT: Once = Once::new();
 impl WirehairEncoder {

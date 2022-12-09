@@ -20,10 +20,20 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
     match (args().nth(1).as_deref(), args().nth(2).as_deref()) {
-        (Some("entropy"), None) => EntropyPeer::random_identity(1000).run_event_loop().await,
+        (Some("entropy"), None) => {
+            EntropyPeer::random_identity(1000, 16)
+                .run_event_loop()
+                .await
+        }
         (Some("kad"), None) => KadPeer::random_identity().run_event_loop().await,
         (Some(protocol), Some("putget")) => {
-            let mut object = vec![0; 1 << 30];
+            let mut object = vec![
+                0;
+                args()
+                    .nth(3)
+                    .map(|arg| arg.parse().unwrap())
+                    .unwrap_or(1 << 30)
+            ];
             thread_rng().fill(&mut object[..]);
 
             let (handle, peer_thread) = opertion_peer(protocol);
@@ -55,7 +65,7 @@ fn opertion_peer(protocol: &str) -> (PeerHandle, JoinHandle<()>) {
             )
         }
         "entropy" => {
-            let mut peer = EntropyPeer::random_identity(1000);
+            let mut peer = EntropyPeer::random_identity(1000, 16);
             (
                 peer.handle(),
                 spawn(async move { peer.run_event_loop().await }),
