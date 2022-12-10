@@ -1,6 +1,6 @@
 use std::env;
 
-use festival::{ProtocolConfig, System, SystemConfig};
+use festival_sim::{ProtocolConfig, System, SystemConfig};
 use rand::{rngs::SmallRng, SeedableRng};
 
 fn main() {
