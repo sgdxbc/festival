@@ -5,7 +5,9 @@ use bincode::Options;
 use futures::{AsyncRead, AsyncWrite};
 use libp2p::{
     core::upgrade::{read_length_prefixed, write_length_prefixed},
+    identity::{self, ed25519::SecretKey, Keypair},
     request_response::{ProtocolName, RequestResponseCodec},
+    Multiaddr,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
@@ -29,6 +31,16 @@ impl PeerHandle {
         self.0.send(Command::Get(id, wait_get.0)).await.unwrap();
         wait_get.1.await.unwrap()
     }
+}
+
+pub fn addr_to_keypair(addr: &Multiaddr) -> Keypair {
+    let mut bytes = addr.to_vec();
+    if bytes.len() > 32 {
+        bytes = bytes[bytes.len() - 32..].to_vec();
+    } else if bytes.len() < 32 {
+        bytes = [vec![0; 32 - bytes.len()], bytes].concat();
+    }
+    identity::Keypair::Ed25519(From::from(SecretKey::from_bytes(&mut bytes).unwrap()))
 }
 
 #[derive(Debug, Clone, Copy)]

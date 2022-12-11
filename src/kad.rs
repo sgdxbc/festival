@@ -1,23 +1,21 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use futures::StreamExt;
 use libp2p::{
     core::upgrade::Version,
-    identity,
     kad::{
         record::Key, store::MemoryStore, GetProvidersOk, Kademlia, KademliaConfig, KademliaEvent,
         QueryId, QueryResult,
     },
-    mdns,
     mplex::MplexConfig,
     multihash::{Hasher, Sha2_256},
     noise::NoiseAuthenticated,
     request_response::{
-        ProtocolSupport, RequestResponse, RequestResponseEvent, RequestResponseMessage,
-        ResponseChannel,
+        ProtocolSupport, RequestResponse, RequestResponseConfig, RequestResponseEvent,
+        RequestResponseMessage, ResponseChannel,
     },
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, PeerId, Swarm, Transport,
+    tcp, Multiaddr, PeerId, Swarm, Transport,
 };
 use rand::{seq::SliceRandom, thread_rng};
 use tokio::{
@@ -28,19 +26,23 @@ use tokio::{
 use tracing::{info, info_span};
 
 use crate::peer::{
-    Command, FileExchangeCodec, FileExchangeProtocol, FileRequest, FileResponse, PeerHandle,
+    addr_to_keypair, Command, FileExchangeCodec, FileExchangeProtocol, FileRequest, FileResponse,
+    PeerHandle,
 };
 
 #[derive(NetworkBehaviour)]
 pub struct KadBehaviour {
     kademlia: Kademlia<MemoryStore>,
     exchange: RequestResponse<FileExchangeCodec>,
-    mdns: mdns::tokio::Behaviour,
+    // mdns: mdns::tokio::Behaviour,
 }
 type Event = <KadBehaviour as NetworkBehaviour>::OutEvent;
 
 pub struct KadPeer {
     swarm: Swarm<KadBehaviour>,
+    #[allow(unused)]
+    n_peer: usize,
+    is_ready: bool,
 
     // active peer (client side) state
     peers: Vec<PeerId>,
@@ -60,8 +62,8 @@ pub struct KadPeer {
 }
 
 impl KadPeer {
-    pub fn random_identity() -> Self {
-        let id_keys = identity::Keypair::generate_ed25519();
+    pub fn new(n_peer: usize, addr: Multiaddr) -> Self {
+        let id_keys = addr_to_keypair(&addr);
         let peer_id = PeerId::from(id_keys.public());
         let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
             .upgrade(Version::V1)
@@ -73,26 +75,28 @@ impl KadPeer {
             MemoryStore::new(peer_id),
             KademliaConfig::default(),
         );
+        let mut exchange_config = RequestResponseConfig::default();
+        exchange_config.set_request_timeout(Duration::from_secs(120));
         let exchange = RequestResponse::new(
             FileExchangeCodec,
             [(FileExchangeProtocol, ProtocolSupport::Full)],
-            Default::default(),
+            exchange_config,
         );
         let mut swarm = Swarm::with_tokio_executor(
             transport,
             KadBehaviour {
                 kademlia,
                 exchange,
-                mdns: mdns::Behaviour::new(Default::default()).unwrap(),
+                // mdns: mdns::Behaviour::new(Default::default()).unwrap(),
             },
             peer_id,
         );
-        swarm
-            .listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap())
-            .unwrap();
+        swarm.listen_on(addr).unwrap();
         let (command_sender, command) = mpsc::channel(1);
         Self {
             swarm,
+            n_peer,
+            is_ready: false,
             peers: Default::default(),
             wait_put: None,
             wait_get: None,
@@ -104,6 +108,15 @@ impl KadPeer {
         }
     }
 
+    pub fn add_peer(&mut self, addr: Multiaddr) {
+        let peer_id = addr_to_keypair(&addr).public().into();
+        self.swarm
+            .behaviour_mut()
+            .kademlia
+            .add_address(&peer_id, addr);
+        self.peers.push(peer_id);
+    }
+
     pub fn handle(&self) -> PeerHandle {
         PeerHandle(self.command_sender.clone())
     }
@@ -112,7 +125,7 @@ impl KadPeer {
         assert!(self.wait_put.is_none());
         self.wait_put = Some(wait_put);
         let peer_id = self.peers.choose(&mut thread_rng()).unwrap();
-        println!("Choose {peer_id} to put");
+        info!("Choose {peer_id} to put");
         // PUT step 1: push object
         self.swarm
             .behaviour_mut()
@@ -132,20 +145,25 @@ impl KadPeer {
 
     async fn handle_event(&mut self, event: Event) {
         match event {
-            Event::Mdns(mdns::Event::Discovered(list)) => {
-                for (peer, addr) in list {
-                    self.peers.push(peer);
-                    self.swarm.behaviour_mut().kademlia.add_address(&peer, addr);
-                }
-            }
-            Event::Mdns(mdns::Event::Expired(list)) => {
-                for (peer, addr) in list {
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .remove_address(&peer, &addr);
-                }
-            }
+            // Event::Mdns(mdns::Event::Discovered(list)) => {
+            //     for (peer, addr) in list {
+            //         self.peers.insert(peer);
+            //         self.swarm.behaviour_mut().kademlia.add_address(&peer, addr);
+            //     }
+            //     if !self.is_ready && self.peers.len() >= self.n_peer - 1 {
+            //         println!("Ready");
+            //         self.is_ready = true;
+            //     }
+            // }
+            // Event::Mdns(mdns::Event::Expired(list)) => {
+            //     for (peer, addr) in list {
+            //         self.swarm
+            //             .behaviour_mut()
+            //             .kademlia
+            //             .remove_address(&peer, &addr);
+            //     }
+            // }
+            Event::Kademlia(KademliaEvent::RoutingUpdated { .. }) => {}
             Event::Kademlia(KademliaEvent::OutboundQueryProgressed {
                 id,
                 result: QueryResult::StartProviding(Ok(_)),
@@ -168,12 +186,25 @@ impl KadPeer {
                 ..
             }) if !self.is_pulling => {
                 assert!(self.wait_get.is_some());
+                if providers.is_empty() {
+                    // println!("! Provider set is empty");
+                    return;
+                }
                 // GET step 2: pull object
                 self.swarm.behaviour_mut().exchange.send_request(
                     &providers.into_iter().next().unwrap(),
                     FileRequest::Pull(key.to_vec().try_into().unwrap()),
                 );
                 self.is_pulling = true;
+            }
+            Event::Kademlia(KademliaEvent::OutboundQueryProgressed {
+                result:
+                    QueryResult::GetProviders(Ok(GetProvidersOk::FinishedWithNoAdditionalRecord {
+                        ..
+                    })),
+                ..
+            }) => {
+                assert!(self.is_pulling)
             }
             Event::Exchange(RequestResponseEvent::Message {
                 message:
@@ -244,6 +275,7 @@ impl KadPeer {
                 // Get step 4: done
                 self.wait_get.take().unwrap().send(object).unwrap()
             }
+            Event::Exchange(RequestResponseEvent::OutboundFailure { .. }) => panic!(),
             event => info!("{event:?}"),
         }
     }
