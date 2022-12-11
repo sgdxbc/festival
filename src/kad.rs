@@ -8,6 +8,7 @@ use libp2p::{
         QueryId, QueryResult,
     },
     mplex::MplexConfig,
+    multiaddr::Protocol,
     multihash::{Hasher, Sha2_256},
     noise::NoiseAuthenticated,
     request_response::{
@@ -42,7 +43,7 @@ pub struct KadPeer {
     swarm: Swarm<KadBehaviour>,
     #[allow(unused)]
     n_peer: usize,
-    is_ready: bool,
+    // is_ready: bool,
 
     // active peer (client side) state
     peers: Vec<PeerId>,
@@ -91,12 +92,18 @@ impl KadPeer {
             },
             peer_id,
         );
+        let addr = addr
+            .replace(0, |p| {
+                assert!(matches!(p, Protocol::Ip4(_)));
+                Some(Protocol::Ip4([0, 0, 0, 0].into()))
+            })
+            .unwrap();
         swarm.listen_on(addr).unwrap();
         let (command_sender, command) = mpsc::channel(1);
         Self {
             swarm,
             n_peer,
-            is_ready: false,
+            // is_ready: false,
             peers: Default::default(),
             wait_put: None,
             wait_get: None,
@@ -114,7 +121,7 @@ impl KadPeer {
             .behaviour_mut()
             .kademlia
             .add_address(&peer_id, addr);
-        self.peers.push(peer_id);
+        // self.peers.push(peer_id);
     }
 
     pub fn handle(&self) -> PeerHandle {
@@ -125,7 +132,16 @@ impl KadPeer {
         assert!(self.wait_put.is_none());
         self.wait_put = Some(wait_put);
         let peer_id = self.peers.choose(&mut thread_rng()).unwrap();
-        info!("Choose {peer_id} to put");
+        info!("Choose {peer_id} to put (from {} peers)", self.peers.len());
+
+        assert!(!self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .addresses_of_peer(peer_id)
+            .is_empty());
+        self.swarm.dial(peer_id.clone()).unwrap();
+
         // PUT step 1: push object
         self.swarm
             .behaviour_mut()
@@ -163,7 +179,9 @@ impl KadPeer {
             //             .remove_address(&peer, &addr);
             //     }
             // }
-            Event::Kademlia(KademliaEvent::RoutingUpdated { .. }) => {}
+            Event::Kademlia(KademliaEvent::RoutingUpdated { peer, .. }) => {
+                self.peers.push(peer);
+            }
             Event::Kademlia(KademliaEvent::OutboundQueryProgressed {
                 id,
                 result: QueryResult::StartProviding(Ok(_)),

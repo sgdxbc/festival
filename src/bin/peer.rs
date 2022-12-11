@@ -11,12 +11,12 @@ use tokio::{
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter, FmtSubscriber};
 
 const HOSTS: &[&str] = &[
-    "/ip4/127.0.0.1",
-    // "/ip4/172.31.9.51",
-    // "/ip4/172.30.6.243",
-    // "/ip4/172.29.7.238",
-    // "/ip4/172.28.1.107",
-    // "/ip4/172.27.3.164",
+    // "/ip4/127.0.0.1",
+    "/ip4/172.31.9.51",
+    "/ip4/172.30.6.243",
+    "/ip4/172.29.7.238",
+    "/ip4/172.28.1.107",
+    "/ip4/172.27.3.164",
 ];
 
 #[tokio::main(worker_threads = 1)]

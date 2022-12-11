@@ -1,3 +1,5 @@
 /target
 perf*
 /paper
+/plot
+/sync.sh
