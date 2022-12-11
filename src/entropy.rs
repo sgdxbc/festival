@@ -1,27 +1,24 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
+    task::Poll,
 };
 
 use bincode::Options;
 use futures::StreamExt;
 use libp2p::{
     core::upgrade::Version,
-    gossipsub::{
-        Gossipsub, GossipsubConfigBuilder, GossipsubEvent, GossipsubMessage, IdentTopic,
-        MessageAuthenticity,
-    },
-    identity, mdns,
+    floodsub::{Floodsub, FloodsubEvent, FloodsubMessage, Topic},
     mplex::MplexConfig,
     multihash::{Hasher, Sha2_256},
     noise::NoiseAuthenticated,
     request_response::{
         ProtocolSupport, RequestResponse, RequestResponseEvent, RequestResponseMessage,
     },
-    swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, PeerId, Swarm, Transport,
+    swarm::{dummy, NetworkBehaviour, SwarmEvent},
+    tcp, Multiaddr, PeerId, Swarm, Transport,
 };
-use rand::random;
+use rand::{random, thread_rng, Rng};
 use tokio::{
     select,
     sync::{mpsc, oneshot},
@@ -31,18 +28,39 @@ use tracing::{info, info_span};
 
 use crate::{
     peer::{
-        Command, FileExchangeCodec, FileExchangeProtocol, FileRequest, FileResponse, PeerHandle,
+        addr_to_keypair, Command, FileExchangeCodec, FileExchangeProtocol, FileRequest,
+        FileResponse, PeerHandle,
     },
     WirehairDecoder, WirehairEncoder,
 };
 
 #[derive(NetworkBehaviour)]
 pub struct EntropyBehaviour {
-    gossip: Gossipsub,
+    gossip: Floodsub,
     exchange: RequestResponse<FileExchangeCodec>,
-    mdns: mdns::tokio::Behaviour,
+    peer_address: PeerAddress,
+    // mdns: mdns::tokio::Behaviour,
 }
 type Event = <EntropyBehaviour as NetworkBehaviour>::OutEvent;
+
+pub struct PeerAddress(HashMap<PeerId, Multiaddr>);
+impl NetworkBehaviour for PeerAddress {
+    type ConnectionHandler = dummy::ConnectionHandler;
+    type OutEvent = ();
+    fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
+        vec![self.0[peer_id].clone()]
+    }
+    fn new_handler(&mut self) -> Self::ConnectionHandler {
+        dummy::ConnectionHandler
+    }
+    fn poll(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+        _params: &mut impl libp2p::swarm::PollParameters,
+    ) -> Poll<libp2p::swarm::NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
+        Poll::Pending
+    }
+}
 
 pub struct EntropyPeer {
     swarm: Swarm<EntropyBehaviour>,
@@ -74,22 +92,18 @@ struct WaitGet {
 }
 
 impl EntropyPeer {
-    pub fn random_identity(n_peer: usize, k: usize) -> Self {
-        let id_keys = identity::Keypair::generate_ed25519();
+    pub fn random_identity(n_peer: usize, k: usize, addr: Multiaddr) -> Self {
+        let id_keys = addr_to_keypair(&addr);
         let peer_id = PeerId::from(id_keys.public());
         let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
             .upgrade(Version::V1)
             .authenticate(NoiseAuthenticated::xx(&id_keys).unwrap())
             .multiplex(MplexConfig::new())
             .boxed();
-        let mut gossip = Gossipsub::new(
-            MessageAuthenticity::Signed(id_keys),
-            GossipsubConfigBuilder::default().build().unwrap(),
-        )
-        .unwrap();
-        gossip.subscribe(&IdentTopic::new("put")).unwrap();
-        gossip.subscribe(&IdentTopic::new("get")).unwrap();
-        gossip.subscribe(&IdentTopic::new("show")).unwrap();
+        let mut gossip = Floodsub::new(peer_id);
+        gossip.subscribe(Topic::new("put"));
+        gossip.subscribe(Topic::new("get"));
+        gossip.subscribe(Topic::new("show"));
         let exchange = RequestResponse::new(
             FileExchangeCodec,
             [(FileExchangeProtocol, ProtocolSupport::Full)],
@@ -100,13 +114,12 @@ impl EntropyPeer {
             EntropyBehaviour {
                 gossip,
                 exchange,
-                mdns: mdns::Behaviour::new(Default::default()).unwrap(),
+                peer_address: PeerAddress(Default::default()),
+                // mdns: mdns::Behaviour::new(Default::default()).unwrap(),
             },
             peer_id,
         );
-        swarm
-            .listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap())
-            .unwrap();
+        swarm.listen_on(addr).unwrap();
         let (command_sender, command) = mpsc::channel(1);
         Self {
             swarm,
@@ -126,6 +139,21 @@ impl EntropyPeer {
         PeerHandle(self.command_sender.clone())
     }
 
+    pub fn add_peer(&mut self, addr: Multiaddr) {
+        let peer_id = addr_to_keypair(&addr).public().into();
+        self.swarm
+            .behaviour_mut()
+            .peer_address
+            .0
+            .insert(peer_id, addr);
+        if thread_rng().gen_bool(10. / self.n_peer as f64) {
+            self.swarm
+                .behaviour_mut()
+                .gossip
+                .add_node_to_partial_view(peer_id);
+        }
+    }
+
     async fn put(&mut self, object: Vec<u8>, wait_put: oneshot::Sender<[u8; 32]>) {
         assert!(self.wait_put.is_none());
         // PUT step 1: gossip PUT
@@ -140,8 +168,8 @@ impl EntropyPeer {
         self.swarm
             .behaviour_mut()
             .gossip
-            .publish(IdentTopic::new("put"), id)
-            .unwrap();
+            .publish(Topic::new("put"), id);
+        println!("Published");
         self.wait_put = Some(WaitPut {
             sender: wait_put,
             id,
@@ -159,8 +187,7 @@ impl EntropyPeer {
         self.swarm
             .behaviour_mut()
             .gossip
-            .publish(IdentTopic::new("get"), id)
-            .unwrap();
+            .publish(Topic::new("get"), id);
         self.wait_get = Some(WaitGet {
             sender: wait_get,
             id,
@@ -169,17 +196,18 @@ impl EntropyPeer {
     }
 
     async fn handle_event(&mut self, event: Event) {
+        if matches!(event, Event::Gossip(FloodsubEvent::Message(_))) {
+            println!("{event:?}");
+        }
         match event {
-            Event::Gossip(GossipsubEvent::Message {
-                message:
-                    GossipsubMessage {
-                        source: Some(peer),
-                        data,
-                        topic,
-                        ..
-                    },
+            Event::Gossip(FloodsubEvent::Subscribed { .. }) => {}
+            Event::Gossip(FloodsubEvent::Message(FloodsubMessage {
+                source: peer,
+                data,
+                topics,
                 ..
-            }) if topic.as_str() == "put" => {
+            })) if topics[0].id() == "put" => {
+                println!("Receive gossip PUT");
                 // select with probability k/N
                 // first generate a random number uniformly in [0, N/k)
                 // if it is inside [0, 1), further scale it to [0, u32::MAX) as final frag id
@@ -228,25 +256,17 @@ impl EntropyPeer {
             }) => {
                 // PUT step 4: gossip SHOW
                 self.fragments = Some((id, frag_id, frag));
-                self.swarm
-                    .behaviour_mut()
-                    .gossip
-                    .publish(
-                        IdentTopic::new("show"),
-                        bincode::options().serialize(&(id, frag_id)).unwrap(),
-                    )
-                    .unwrap();
+                self.swarm.behaviour_mut().gossip.publish(
+                    Topic::new("show"),
+                    bincode::options().serialize(&(id, frag_id)).unwrap(),
+                )
             }
-            Event::Gossip(GossipsubEvent::Message {
-                message:
-                    GossipsubMessage {
-                        source: Some(peer),
-                        topic,
-                        data,
-                        ..
-                    },
+            Event::Gossip(FloodsubEvent::Message(FloodsubMessage {
+                source: peer,
+                data,
+                topics,
                 ..
-            }) if topic.as_str() == "show" => {
+            })) if topics[0].id() == "show" => {
                 // PUT step 5: collect gossip SHOW
                 let Some(wait_put) = self.wait_put.as_mut() else {
                     return; // TODO other cases that want to handle SHOW gossip
@@ -263,16 +283,12 @@ impl EntropyPeer {
                     wait_put.sender.send(wait_put.id).unwrap()
                 }
             }
-            Event::Gossip(GossipsubEvent::Message {
-                message:
-                    GossipsubMessage {
-                        source: Some(peer),
-                        topic,
-                        data,
-                        ..
-                    },
+            Event::Gossip(FloodsubEvent::Message(FloodsubMessage {
+                source: peer,
+                data,
+                topics,
                 ..
-            }) if topic.as_str() == "get" => {
+            })) if topics[0].id() == "get" => {
                 // GET step 2: push fragment
                 if let Some((id, frag_id, frag)) = self.fragments.as_ref() {
                     if <[u8; 32]>::try_from(data).unwrap() == *id {

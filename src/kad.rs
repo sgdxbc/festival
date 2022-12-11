@@ -8,7 +8,6 @@ use libp2p::{
         QueryId, QueryResult,
     },
     mplex::MplexConfig,
-    multiaddr::Protocol,
     multihash::{Hasher, Sha2_256},
     noise::NoiseAuthenticated,
     request_response::{
@@ -92,12 +91,12 @@ impl KadPeer {
             },
             peer_id,
         );
-        let addr = addr
-            .replace(0, |p| {
-                assert!(matches!(p, Protocol::Ip4(_)));
-                Some(Protocol::Ip4([0, 0, 0, 0].into()))
-            })
-            .unwrap();
+        // let addr = addr
+        //     .replace(0, |p| {
+        //         assert!(matches!(p, Protocol::Ip4(_)));
+        //         Some(Protocol::Ip4([0, 0, 0, 0].into()))
+        //     })
+        //     .unwrap();
         swarm.listen_on(addr).unwrap();
         let (command_sender, command) = mpsc::channel(1);
         Self {

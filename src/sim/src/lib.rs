@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{hash_map::Entry::Occupied, BinaryHeap},
+    collections::BinaryHeap,
     hash::{Hash, Hasher},
     time::{Duration, Instant},
 };
@@ -12,7 +12,7 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 pub struct System<R> {
     oracle: SystemOracle,
     peers: FxHashMap<[u8; 32], Peer>,
-    peer_buckets: FxHashMap<Box<[u8]>, FxHashSet<[u8; 32]>>,
+    object_peers: FxHashMap<[u8; 32], FxHashSet<[u8; 32]>>,
     rng: R,
     config: SystemConfig,
     pub stats: SystemStats,
@@ -40,9 +40,8 @@ pub enum ProtocolConfig {
         check_celebration_sec: u32,
         gossip_sec: u32,
     },
-    Kademlia {
+    Replicated {
         n: usize,
-        republish_sec: u32,
     },
 }
 
@@ -69,9 +68,6 @@ enum Event {
         object_id: [u8; 32],
         age: u32,
     },
-
-    // kademlia
-    Republish([u8; 32]),
 }
 
 #[derive(Default)]
@@ -92,7 +88,6 @@ impl SystemOracle {
 }
 
 impl<R: Rng> System<R> {
-    const BUCKET_KEY_LEN: usize = 1;
     pub fn new(rng: R, config: SystemConfig) -> Self {
         let mut system = Self {
             oracle: SystemOracle {
@@ -100,7 +95,7 @@ impl<R: Rng> System<R> {
                 events: Default::default(),
             },
             peers: Default::default(),
-            peer_buckets: Default::default(),
+            object_peers: Default::default(),
             rng,
             config,
             stats: Default::default(),
@@ -138,7 +133,6 @@ impl<R: Rng> System<R> {
                     object_id,
                     age,
                 } => self.on_check_celebration(peer_id, object_id, age),
-                Event::Republish(object_id) => self.on_republish(object_id),
             }
 
             let now = Instant::now();
@@ -163,12 +157,37 @@ impl<R: Rng> System<R> {
             ProtocolConfig::Festival { k, .. } => {
                 self.stats.n_store -= peer.fragments.len() as f32 / k as f32
             }
-            ProtocolConfig::Kademlia { .. } => self.stats.n_store -= peer.fragments.len() as f32,
+            ProtocolConfig::Replicated { .. } => {
+                self.stats.n_store -= peer.fragments.len() as f32;
+
+                for object_id in peer.fragments.keys() {
+                    let removed = self
+                        .object_peers
+                        .get_mut(object_id)
+                        .unwrap()
+                        .remove(&peer_id);
+                    assert!(removed);
+
+                    let mut peer_id;
+                    while {
+                        peer_id = *self.peers.keys().choose(&mut self.rng).unwrap();
+                        self.object_peers[object_id].contains(&peer_id)
+                    } {}
+                    self.object_peers
+                        .get_mut(object_id)
+                        .unwrap()
+                        .insert(peer_id);
+                    self.peers
+                        .get_mut(&peer_id)
+                        .unwrap()
+                        .fragments
+                        .insert(*object_id, ());
+                    self.stats.n_repair += 1;
+                    self.stats.n_store += 1.;
+                }
+            }
         }
-        self.peer_buckets
-            .get_mut(&peer_id[..Self::BUCKET_KEY_LEN])
-            .unwrap()
-            .remove(&peer_id);
+
         self.insert_peer();
         self.oracle.push_event(
             Poisson::new(365. * 86400. / self.config.failure_rate / self.config.n_peer as f32)
@@ -299,53 +318,10 @@ impl<R: Rng> System<R> {
         );
     }
 
-    fn on_republish(&mut self, object_id: [u8; 32]) {
-        let ProtocolConfig::Kademlia { republish_sec, ..} = self.config.protocol else {
-            unreachable!()
-        };
-        let mut lost = true;
-        for peer_id in self.get_closest(object_id) {
-            let peer = self.peers.get_mut(&peer_id).unwrap();
-            let entry = peer.fragments.entry(object_id);
-            if matches!(entry, Occupied(_)) {
-                lost = false;
-            } else {
-                entry.or_insert(());
-                self.stats.n_repair += 1;
-                self.stats.n_store += 1.;
-            }
-        }
-        assert!(!lost, "object lost");
-        self.oracle
-            .push_event(republish_sec, Event::Republish(object_id));
-    }
-
     fn insert_peer(&mut self) {
         let peer_id = self.rng.gen();
         let present = self.peers.insert(peer_id, Peer::default());
         assert!(present.is_none());
-        self.peer_buckets
-            .entry(peer_id[..Self::BUCKET_KEY_LEN].into())
-            .or_default()
-            .insert(peer_id);
-    }
-
-    fn get_closest(&self, id: [u8; 32]) -> impl Iterator<Item = [u8; 32]> {
-        let ProtocolConfig::Kademlia { n: k, .. } = self.config.protocol else {
-            unreachable!()
-        };
-        let mut bucket = self.peer_buckets[&id[..Self::BUCKET_KEY_LEN]]
-            .clone()
-            .into_iter()
-            .collect::<Vec<_>>();
-        assert!(bucket.len() >= k); //
-        bucket.sort_unstable_by_key(|id_low| {
-            id.iter()
-                .zip(id_low.iter())
-                .map(|(&a, &b)| a ^ b)
-                .collect::<Vec<_>>()
-        });
-        bucket.into_iter().take(k)
     }
 
     fn eligible(
@@ -397,16 +373,19 @@ impl<R: Rng> System<R> {
                     });
                 self.stats.n_store += k_repair as f32 / k as f32;
             }
-            ProtocolConfig::Kademlia {
-                republish_sec, n, ..
-            } => {
-                for peer_id in self.get_closest(object_id) {
-                    let peer = self.peers.get_mut(&peer_id).unwrap();
+            ProtocolConfig::Replicated { n, .. } => {
+                self.object_peers.insert(
+                    object_id,
+                    self.peers
+                        .keys()
+                        .cloned()
+                        .choose_multiple(&mut self.rng, n)
+                        .into_iter()
+                        .collect(),
+                );
+                for peer_id in &self.object_peers[&object_id] {
+                    let peer = self.peers.get_mut(peer_id).unwrap();
                     peer.fragments.insert(object_id, ());
-                    self.oracle.push_event(
-                        (0..republish_sec).choose(&mut self.rng).unwrap(),
-                        Event::Republish(object_id),
-                    )
                 }
                 self.stats.n_store += n as f32;
             }

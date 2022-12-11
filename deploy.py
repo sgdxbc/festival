@@ -7,7 +7,7 @@ from sys import stdin, argv
 host_i, n_instance = int(argv[1]), int(argv[2])
 
 async def spawn_instance(sem, i):
-    p = await run("./peer", "kad", str(host_i), str(n_instance), str(i), stdout=PIPE, stderr=PIPE)
+    p = await run("./peer", "entropy", str(host_i), str(n_instance), str(i), stdout=PIPE, stderr=PIPE)
     while not p.stdout.at_eof():
         line = await p.stdout.readline()
         print(line.decode(), end='')

@@ -21,10 +21,7 @@ fn main() {
         //     check_celebration_sec: 24 * 3600,
         //     gossip_sec: 18 * 3600,
         // },
-        protocol: ProtocolConfig::Kademlia {
-            n: 20,
-            republish_sec: 3600,
-        },
+        protocol: ProtocolConfig::Replicated { n: 20 },
     };
     println!("{config:?}");
 
