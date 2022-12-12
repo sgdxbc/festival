@@ -18,12 +18,13 @@ fn main() {
             k: 64,
             k_select: 64 * 2,
             k_repair: 64 * 8 / 5,
+            cache_hit_rate: 0.1,
         },
         // protocol: ProtocolConfig::Replicated { n: 3 },
     };
     println!("{config:?}");
 
     let mut system = System::new(rng, config);
-    system.run(10 * 365 * 86400);
+    system.run(365 * 86400);
     println!("{:?}", system.stats);
 }

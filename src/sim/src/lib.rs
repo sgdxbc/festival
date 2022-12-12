@@ -37,6 +37,7 @@ pub enum ProtocolConfig {
         k_select: usize,
         k: usize,
         k_repair: usize,
+        cache_hit_rate: f32,
         // check_celebration_sec: u32,
         // gossip_sec: u32,
     },
@@ -137,7 +138,12 @@ impl<R: Rng> System<R> {
         let peer_id = *self.peers.keys().choose(&mut self.rng).unwrap();
         let peer = self.peers.remove(&peer_id).unwrap();
         match self.config.protocol {
-            ProtocolConfig::Festival { k, k_repair, .. } => {
+            ProtocolConfig::Festival {
+                k,
+                k_repair,
+                cache_hit_rate,
+                ..
+            } => {
                 self.stats.n_store -= peer.fragments.len() as f32 / k as f32;
 
                 for (object_id, age) in peer.fragments {
@@ -161,7 +167,11 @@ impl<R: Rng> System<R> {
                                     .get_mut(&object_id)
                                     .unwrap()
                                     .insert(peer_id);
-                                self.stats.n_repair += 1. / k as f32; //
+                                self.stats.n_repair += if self.rng.gen_bool(cache_hit_rate as _) {
+                                    1. / k as f32
+                                } else {
+                                    1.
+                                };
                                 self.stats.n_store += 1. / k as f32;
                             }
                         }
