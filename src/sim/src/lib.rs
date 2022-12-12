@@ -34,11 +34,11 @@ pub struct SystemConfig {
 #[derive(Debug, Clone)]
 pub enum ProtocolConfig {
     Festival {
-        n_peer_per_age: usize,
+        k_select: usize,
         k: usize,
         k_repair: usize,
-        check_celebration_sec: u32,
-        gossip_sec: u32,
+        // check_celebration_sec: u32,
+        // gossip_sec: u32,
     },
     Replicated {
         n: usize,
@@ -48,7 +48,6 @@ pub enum ProtocolConfig {
 #[derive(Debug, Default)]
 pub struct SystemStats {
     n_failure: u32,
-    n_gossip: u32,
     n_repair: f32,
     n_store: f32,
 }
@@ -56,24 +55,23 @@ pub struct SystemStats {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Event {
     PeerFailure,
-
     // festival
-    GossipFragment {
-        peer_id: [u8; 32],
-        object_id: [u8; 32],
-        age: u32,
-    },
-    CheckCelebration {
-        peer_id: [u8; 32],
-        object_id: [u8; 32],
-        age: u32,
-    },
+    // GossipFragment {
+    //     peer_id: [u8; 32],
+    //     object_id: [u8; 32],
+    //     age: u32,
+    // },
+    // CheckCelebration {
+    //     peer_id: [u8; 32],
+    //     object_id: [u8; 32],
+    //     age: u32,
+    // },
 }
 
 #[derive(Default)]
 struct Peer {
-    fragments: FxHashSet<[u8; 32]>,
-    responsible_objects: FxHashMap<[u8; 32], FxHashMap<[u8; 32], u32>>,
+    fragments: FxHashMap<[u8; 32], u32>,
+    // responsible_objects: FxHashMap<[u8; 32], FxHashMap<[u8; 32], u32>>,
 }
 
 impl SystemOracle {
@@ -118,16 +116,6 @@ impl<R: Rng> System<R> {
         } {
             match event {
                 Event::PeerFailure => self.on_peer_failure(),
-                Event::GossipFragment {
-                    peer_id,
-                    object_id,
-                    age,
-                } => self.on_gossip_fragment(peer_id, object_id, age),
-                Event::CheckCelebration {
-                    peer_id,
-                    object_id,
-                    age,
-                } => self.on_check_celebration(peer_id, object_id, age),
             }
 
             let now = Instant::now();
@@ -149,13 +137,41 @@ impl<R: Rng> System<R> {
         let peer_id = *self.peers.keys().choose(&mut self.rng).unwrap();
         let peer = self.peers.remove(&peer_id).unwrap();
         match self.config.protocol {
-            ProtocolConfig::Festival { k, .. } => {
-                self.stats.n_store -= peer.fragments.len() as f32 / k as f32
+            ProtocolConfig::Festival { k, k_repair, .. } => {
+                self.stats.n_store -= peer.fragments.len() as f32 / k as f32;
+
+                for (object_id, age) in peer.fragments {
+                    let removed = self
+                        .object_peers
+                        .get_mut(&object_id)
+                        .unwrap()
+                        .remove(&peer_id);
+                    assert!(removed);
+                    assert!(self.object_peers[&object_id].len() >= k);
+                    if self.object_peers[&object_id].len() < k_repair {
+                        for (&peer_id, peer) in &mut self.peers {
+                            if self.object_peers[&object_id].contains(&peer_id) {
+                                continue;
+                            }
+                            if Self::check_responsible(peer_id, object_id, age + 1, &self.config)
+                                .is_some()
+                            {
+                                peer.fragments.insert(object_id, age + 1);
+                                self.object_peers
+                                    .get_mut(&object_id)
+                                    .unwrap()
+                                    .insert(peer_id);
+                                self.stats.n_repair += 1. / k as f32; //
+                                self.stats.n_store += 1. / k as f32;
+                            }
+                        }
+                    }
+                }
             }
             ProtocolConfig::Replicated { .. } => {
                 self.stats.n_store -= peer.fragments.len() as f32;
 
-                for object_id in &peer.fragments {
+                for object_id in peer.fragments.keys() {
                     let removed = self
                         .object_peers
                         .get_mut(object_id)
@@ -180,7 +196,7 @@ impl<R: Rng> System<R> {
                         .get_mut(&peer_id)
                         .unwrap()
                         .fragments
-                        .insert(*object_id);
+                        .insert(*object_id, 0);
                     self.stats.n_repair += 1.;
                     self.stats.n_store += 1.;
                 }
@@ -193,109 +209,6 @@ impl<R: Rng> System<R> {
                 .unwrap()
                 .sample(&mut self.rng) as _,
             Event::PeerFailure,
-        );
-    }
-
-    fn on_gossip_fragment(&mut self, peer_id: [u8; 32], object_id: [u8; 32], age: u32) {
-        let ProtocolConfig::Festival {check_celebration_sec, gossip_sec, ..} = self.config.protocol else {
-            unreachable!()
-        };
-        if !self.peers.contains_key(&peer_id) {
-            return;
-        }
-        self.stats.n_gossip += 1;
-        for (&peer2_id, peer2) in &mut self.peers {
-            if peer2_id == peer_id {
-                continue;
-            }
-            if peer2.fragments.contains(&object_id) {
-                continue; // TODO garbage collection
-            }
-            if let Some(alive_peers) = peer2.responsible_objects.get_mut(&object_id) {
-                alive_peers.insert(peer_id, age);
-            } else if let Some(_i) =
-                Self::check_responsible(peer2_id, object_id, age + 1, &self.config)
-            {
-                peer2
-                    .responsible_objects
-                    .insert(object_id, [(peer_id, age)].into_iter().collect());
-                self.oracle.push_event(
-                    (gossip_sec..check_celebration_sec)
-                        .choose(&mut self.rng)
-                        .unwrap(),
-                    Event::CheckCelebration {
-                        peer_id: peer2_id,
-                        object_id,
-                        age: age + 1,
-                    },
-                )
-            }
-        }
-        self.oracle.push_event(
-            gossip_sec,
-            Event::GossipFragment {
-                peer_id,
-                object_id,
-                age,
-            },
-        );
-    }
-
-    fn on_check_celebration(&mut self, peer_id: [u8; 32], object_id: [u8; 32], age: u32) {
-        let ProtocolConfig::Festival {k, k_repair, check_celebration_sec, gossip_sec, ..} = self.config.protocol else {
-            unreachable!()
-        };
-        let Some(peer) = self.peers.get_mut(&peer_id) else {
-            return;
-        };
-        let alive_peers = peer.responsible_objects.remove(&object_id).unwrap();
-        let local_alive_len = alive_peers.len();
-        let mut global_alive_len = 0;
-        let mut later_len = 0;
-        for (peer_id, peer_age) in alive_peers {
-            if self.peers.contains_key(&peer_id) {
-                global_alive_len += 1;
-            }
-            if peer_age >= age {
-                later_len += 1;
-            }
-        }
-        assert!(
-            global_alive_len >= k,
-            "object lost: {global_alive_len} < {k}"
-        );
-        let Some(peer) = self.peers.get_mut(&peer_id) else {
-            unreachable!();
-        };
-        if local_alive_len >= k_repair {
-            if later_len < k_repair {
-                peer.responsible_objects
-                    .insert(object_id, Default::default());
-                self.oracle.push_event(
-                    check_celebration_sec,
-                    Event::CheckCelebration {
-                        peer_id,
-                        object_id,
-                        age,
-                    },
-                );
-            }
-            return;
-        }
-        // start repairing
-        // it does not matter who to fetch fragments, as long as we can find
-        // enough peers (which is asserted above), and correctly record traffic
-        // overhead
-        self.stats.n_repair += 1. / k as f32; // TODO determine with/without booster
-        peer.fragments.insert(object_id);
-        self.stats.n_store += 1. / k as f32;
-        self.oracle.push_event(
-            (0..gossip_sec).choose(&mut self.rng).unwrap(),
-            Event::GossipFragment {
-                peer_id,
-                object_id,
-                age,
-            },
         );
     }
 
@@ -314,7 +227,7 @@ impl<R: Rng> System<R> {
         let mut hasher = FxHasher::default();
         (peer_id, object_id, age).hash(&mut hasher);
         let mut rng = SmallRng::seed_from_u64(hasher.finish());
-        let ProtocolConfig::Festival {n_peer_per_age, ..} = config.protocol else {
+        let ProtocolConfig::Festival {k_select: n_peer_per_age, ..} = config.protocol else {
             unreachable!()
         };
         if rng.gen_ratio(n_peer_per_age as _, config.n_peer as _) {
@@ -326,31 +239,19 @@ impl<R: Rng> System<R> {
 
     fn insert_object(&mut self, object_id: [u8; 32]) {
         match self.config.protocol {
-            ProtocolConfig::Festival {
-                k_repair,
-                k,
-                gossip_sec,
-                ..
-            } => {
-                // this is probably not the `n_repair` peers that suppose to
-                // store the fragments for age = 1
-                // however as soon as age moves on things should get correct
+            ProtocolConfig::Festival { k, .. } => {
+                let mut peers = FxHashSet::default();
                 self.peers
                     .iter_mut()
-                    .choose_multiple(&mut self.rng, k_repair)
-                    .into_iter()
+                    .filter(|(&peer_id, _)| {
+                        Self::check_responsible(peer_id, object_id, 1, &self.config).is_some()
+                    })
                     .for_each(|(&peer_id, peer)| {
-                        peer.fragments.insert(object_id);
-                        self.oracle.push_event(
-                            (0..gossip_sec).choose(&mut self.rng).unwrap(),
-                            Event::GossipFragment {
-                                peer_id,
-                                object_id,
-                                age: 1,
-                            },
-                        )
+                        peer.fragments.insert(object_id, 1);
+                        peers.insert(peer_id);
                     });
-                self.stats.n_store += k_repair as f32 / k as f32;
+                self.object_peers.insert(object_id, peers);
+                self.stats.n_store += self.object_peers[&object_id].len() as f32 / k as f32;
             }
             ProtocolConfig::Replicated { n, .. } => {
                 self.object_peers.insert(
@@ -364,7 +265,7 @@ impl<R: Rng> System<R> {
                 );
                 for peer_id in &self.object_peers[&object_id] {
                     let peer = self.peers.get_mut(peer_id).unwrap();
-                    peer.fragments.insert(object_id);
+                    peer.fragments.insert(object_id, 0);
                 }
                 self.stats.n_store += n as f32;
             }

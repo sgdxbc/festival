@@ -11,21 +11,19 @@ fn main() {
     );
 
     let config = SystemConfig {
-        n_peer: 10000,
+        n_peer: 100000,
         failure_rate: 1.,
-        n_object: 10,
+        n_object: 1,
         protocol: ProtocolConfig::Festival {
-            n_peer_per_age: 32,
             k: 64,
+            k_select: 64 * 2,
             k_repair: 64 * 8 / 5,
-            check_celebration_sec: 24 * 3600,
-            gossip_sec: 18 * 3600,
         },
         // protocol: ProtocolConfig::Replicated { n: 3 },
     };
     println!("{config:?}");
 
     let mut system = System::new(rng, config);
-    system.run(365 * 86400);
+    system.run(10 * 365 * 86400);
     println!("{:?}", system.stats);
 }
