@@ -23,7 +23,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::spawn_blocking,
 };
-use tracing::{info, info_span, warn};
+use tracing::{info, info_span};
 
 use crate::peer::{
     addr_to_keypair, Command, FileExchangeCodec, FileExchangeProtocol, FileRequest, FileResponse,
@@ -222,14 +222,14 @@ impl KadPeer {
                     })),
                 ..
             }) => {
-                // assert!(self.is_pulling)
-                if !self.is_pulling {
-                    warn!("Retry find provider");
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .get_providers(Key::new(&self.wait_get.as_ref().unwrap().0));
-                }
+                assert!(self.is_pulling)
+                // if !self.is_pulling {
+                //     warn!("Retry find provider");
+                //     self.swarm
+                //         .behaviour_mut()
+                //         .kademlia
+                //         .get_providers(Key::new(&self.wait_get.as_ref().unwrap().0));
+                // }
             }
             Event::Exchange(RequestResponseEvent::Message {
                 message:

@@ -2,7 +2,7 @@ use std::{env::args, time::Duration};
 
 use festival::{peer::PeerHandle, EntropyPeer, KadPeer};
 use libp2p::Multiaddr;
-use rand::{thread_rng, Rng};
+use rand::{seq::SliceRandom, thread_rng, Rng};
 use tokio::{
     spawn,
     task::JoinHandle,
@@ -58,7 +58,7 @@ async fn main() {
             );
             for host in HOSTS {
                 for i in 1..=peer_per_host {
-                    peer.add_pending_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap());
+                    peer.add_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap(), false);
                 }
             }
             peer.add_peer(format!("{}/tcp/10000", HOSTS[0]).parse().unwrap(), true);
@@ -72,10 +72,16 @@ async fn main() {
                     .parse()
                     .unwrap(),
             );
-            for host in HOSTS {
-                for i in 1..=peer_per_host {
-                    peer.add_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap());
-                }
+            let mut peers = HOSTS
+                .iter()
+                .flat_map(|host| {
+                    (1..=peer_per_host)
+                        .map(move |i| format!("{host}/tcp/{}", 10000 + i).parse().unwrap())
+                })
+                .collect::<Vec<Multiaddr>>();
+            peers.shuffle(&mut thread_rng());
+            for other_peer in peers {
+                peer.add_peer(other_peer);
             }
             println!("READY");
             peer.run_event_loop().await
@@ -84,7 +90,7 @@ async fn main() {
             let size = args()
                 .nth(6)
                 .map(|arg| arg.parse().unwrap())
-                .unwrap_or(1 << 30);
+                .unwrap_or(1 << 26); // 64MB
             let mut object = vec![0; size];
             thread_rng().fill(&mut object[..]);
 
