@@ -13,11 +13,17 @@ use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter, FmtSubscriber};
 
 const HOSTS: &[&str] = &[
     // "/ip4/127.0.0.1",
-    "/ip4/172.31.9.51",
-    "/ip4/172.30.6.243",
-    "/ip4/172.29.7.238",
-    "/ip4/172.28.1.107",
-    "/ip4/172.27.3.164",
+
+    // "/ip4/172.31.9.51",
+    // "/ip4/172.30.6.243",
+    // "/ip4/172.29.7.238",
+    // "/ip4/172.28.1.107",
+    // "/ip4/172.27.3.164",
+    "/ip4/172.31.19.153",
+    "/ip4/172.30.15.180",
+    "/ip4/172.29.7.84",
+    "/ip4/172.28.10.12",
+    "/ip4/172.27.5.133",
 ];
 
 const ENTROPY_K: usize = 64;
@@ -143,10 +149,16 @@ fn opertion_peer(
     match protocol {
         "kad" => {
             let mut peer = KadPeer::new(n_peer, addr);
-            for host in HOSTS {
-                for i in 1..=peer_per_host {
-                    peer.add_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap());
-                }
+            let mut peers = HOSTS
+                .iter()
+                .flat_map(|host| {
+                    (1..=peer_per_host)
+                        .map(move |i| format!("{host}/tcp/{}", 10000 + i).parse().unwrap())
+                })
+                .collect::<Vec<Multiaddr>>();
+            peers.shuffle(&mut thread_rng());
+            for other_peer in peers {
+                peer.add_peer(other_peer);
             }
             (
                 peer.handle(),

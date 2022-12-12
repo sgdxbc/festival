@@ -138,7 +138,7 @@ impl EntropyPeer {
             swarm,
             n_peer,
             k,
-            k_put: k * 8 / 5,
+            k_put: k * 6 / 5,
             k_select: k * 2, //
             pending_connect_peers: Default::default(),
             command,
