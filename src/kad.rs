@@ -5,7 +5,7 @@ use libp2p::{
     core::upgrade::Version,
     kad::{
         record::Key, store::MemoryStore, GetProvidersOk, Kademlia, KademliaConfig, KademliaEvent,
-        QueryId, QueryResult,
+        ProgressStep, QueryId, QueryResult,
     },
     mplex::MplexConfig,
     multihash::{Hasher, Sha2_256},
@@ -23,7 +23,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::spawn_blocking,
 };
-use tracing::{info, info_span};
+use tracing::{info, info_span, warn};
 
 use crate::peer::{
     addr_to_keypair, Command, FileExchangeCodec, FileExchangeProtocol, FileRequest, FileResponse,
@@ -47,7 +47,7 @@ pub struct KadPeer {
     // active peer (client side) state
     peers: Vec<PeerId>,
     wait_put: Option<oneshot::Sender<[u8; 32]>>,
-    wait_get: Option<oneshot::Sender<Vec<u8>>>,
+    wait_get: Option<([u8; 32], oneshot::Sender<Vec<u8>>)>,
     // whether a pull request is already sent to a provider
     is_pulling: bool,
     command: mpsc::Receiver<Command>,
@@ -76,7 +76,7 @@ impl KadPeer {
             KademliaConfig::default(),
         );
         let mut exchange_config = RequestResponseConfig::default();
-        exchange_config.set_request_timeout(Duration::from_secs(120));
+        exchange_config.set_request_timeout(Duration::from_secs(300));
         let exchange = RequestResponse::new(
             FileExchangeCodec,
             [(FileExchangeProtocol, ProtocolSupport::Full)],
@@ -150,7 +150,7 @@ impl KadPeer {
 
     fn get(&mut self, id: [u8; 32], wait_get: oneshot::Sender<Vec<u8>>) {
         assert!(self.wait_get.is_none());
-        self.wait_get = Some(wait_get);
+        self.wait_get = Some((id, wait_get));
         // GET step 1: find providers (should only find one)
         self.swarm
             .behaviour_mut()
@@ -184,8 +184,9 @@ impl KadPeer {
             Event::Kademlia(KademliaEvent::OutboundQueryProgressed {
                 id,
                 result: QueryResult::StartProviding(Ok(_)),
+                step: ProgressStep { last, .. },
                 ..
-            }) => {
+            }) if last => {
                 // PUT step 3: response pushing peer
                 let channel = self.push_peers.remove(&id).unwrap();
                 self.swarm
@@ -221,7 +222,14 @@ impl KadPeer {
                     })),
                 ..
             }) => {
-                assert!(self.is_pulling)
+                // assert!(self.is_pulling)
+                if !self.is_pulling {
+                    warn!("Retry find provider");
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .get_providers(Key::new(&self.wait_get.as_ref().unwrap().0));
+                }
             }
             Event::Exchange(RequestResponseEvent::Message {
                 message:
@@ -290,9 +298,9 @@ impl KadPeer {
                 ..
             }) => {
                 // Get step 4: done
-                self.wait_get.take().unwrap().send(object).unwrap()
+                self.wait_get.take().unwrap().1.send(object).unwrap()
             }
-            Event::Exchange(RequestResponseEvent::OutboundFailure { .. }) => panic!(),
+            // Event::Exchange(RequestResponseEvent::OutboundFailure { .. }) => panic!(),
             event => info!("{event:?}"),
         }
     }

@@ -11,10 +11,12 @@ use libp2p::{
     core::upgrade::Version,
     floodsub::{Floodsub, FloodsubEvent, FloodsubMessage, Topic},
     mplex::MplexConfig,
+    multiaddr::Protocol,
     multihash::{Hasher, Sha2_256},
     noise::NoiseAuthenticated,
     request_response::{
-        ProtocolSupport, RequestResponse, RequestResponseEvent, RequestResponseMessage,
+        ProtocolSupport, RequestResponse, RequestResponseConfig, RequestResponseEvent,
+        RequestResponseMessage,
     },
     swarm::{dummy, keep_alive, NetworkBehaviour, SwarmEvent},
     tcp, Multiaddr, PeerId, Swarm, Transport,
@@ -97,7 +99,7 @@ struct WaitGet {
 }
 
 impl EntropyPeer {
-    pub fn random_identity(n_peer: usize, k: usize, addr: Multiaddr) -> Self {
+    pub fn new(n_peer: usize, k: usize, addr: Multiaddr) -> Self {
         let id_keys = addr_to_keypair(&addr);
         let peer_id = PeerId::from(id_keys.public());
         let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
@@ -106,10 +108,12 @@ impl EntropyPeer {
             .multiplex(MplexConfig::new())
             .boxed();
         let gossip = Floodsub::new(peer_id);
+        let mut exchange_config = RequestResponseConfig::default();
+        exchange_config.set_request_timeout(Duration::from_secs(120));
         let exchange = RequestResponse::new(
             FileExchangeCodec,
             [(FileExchangeProtocol, ProtocolSupport::Full)],
-            Default::default(),
+            exchange_config,
         );
         let mut swarm = Swarm::with_tokio_executor(
             transport,
@@ -122,6 +126,12 @@ impl EntropyPeer {
             },
             peer_id,
         );
+        let addr = addr
+            .replace(0, |p| {
+                assert!(matches!(p, Protocol::Ip4(_)));
+                Some(Protocol::Ip4([0, 0, 0, 0].into()))
+            })
+            .unwrap();
         swarm.listen_on(addr).unwrap();
         let (command_sender, command) = mpsc::channel(1);
         Self {
@@ -229,15 +239,18 @@ impl EntropyPeer {
             id,
             decoder: Arc::new(Mutex::new(WirehairDecoder::new(
                 size as _,
-                (size / 16) as _,
+                (size / self.k) as _,
             ))),
         })
     }
 
     async fn handle_event(&mut self, event: Event) {
+        if matches!(event, Event::Gossip(FloodsubEvent::Message(_))) {
+            info!("{event:?}");
+        }
         match event {
             Event::Gossip(FloodsubEvent::Subscribed { peer_id: _, .. }) => {
-                // info!("Subscribed from {peer_id}");
+                // info!("Receive Subscribed from {peer_id}");
                 // self.pending_connect_peers.remove(&peer_id);
             }
             Event::Gossip(FloodsubEvent::Message(FloodsubMessage {
@@ -390,6 +403,7 @@ impl EntropyPeer {
                 command = self.command.recv() => self.handle_command(command.unwrap()).await,
                 event = self.swarm.select_next_some() => match event {
                     SwarmEvent::Behaviour(event) => self.handle_event(event).await,
+                    SwarmEvent::ConnectionEstablished { .. } | SwarmEvent::IncomingConnection { .. } | SwarmEvent::Dialing(_) => {}
                     event => info!("{event:?}"),
                 },
                 _ = &mut sleep => {

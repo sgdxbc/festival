@@ -8,22 +8,30 @@ use tokio::{
     task::JoinHandle,
     time::{sleep, Instant},
 };
+use tracing::metadata::LevelFilter;
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter, FmtSubscriber};
 
 const HOSTS: &[&str] = &[
-    "/ip4/127.0.0.1",
-    // "/ip4/172.31.9.51",
-    // "/ip4/172.30.6.243",
-    // "/ip4/172.29.7.238",
-    // "/ip4/172.28.1.107",
-    // "/ip4/172.27.3.164",
+    // "/ip4/127.0.0.1",
+    "/ip4/172.31.9.51",
+    "/ip4/172.30.6.243",
+    "/ip4/172.29.7.238",
+    "/ip4/172.28.1.107",
+    "/ip4/172.27.3.164",
 ];
 
+const ENTROPY_K: usize = 64;
+
 #[tokio::main(worker_threads = 1)]
+// #[tokio::main]
 async fn main() {
     tracing_log::LogTracer::init().unwrap();
     let subscriber = FmtSubscriber::builder()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::WARN.into())
+                .from_env_lossy(),
+        )
         .with_span_events(FmtSpan::CLOSE)
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
@@ -41,9 +49,9 @@ async fn main() {
     let peer_i = args().nth(4).unwrap().parse::<u16>().unwrap();
     match (args().nth(1).as_deref(), args().nth(5).as_deref()) {
         (Some("entropy"), None) => {
-            let mut peer = EntropyPeer::random_identity(
+            let mut peer = EntropyPeer::new(
                 n_peer,
-                16,
+                ENTROPY_K,
                 format!("{}/tcp/{}", HOSTS[host_i], peer_i + 10000)
                     .parse()
                     .unwrap(),
@@ -69,6 +77,7 @@ async fn main() {
                     peer.add_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap());
                 }
             }
+            println!("READY");
             peer.run_event_loop().await
         }
         (Some(protocol), Some("putget")) => {
@@ -81,7 +90,13 @@ async fn main() {
 
             let (handle, peer_thread) = opertion_peer(
                 protocol,
-                format!("{}/tcp/10000", HOSTS[host_i]).parse().unwrap(),
+                format!(
+                    "{}/tcp/{}",
+                    HOSTS[host_i],
+                    thread_rng().gen_range(20000..30000)
+                )
+                .parse()
+                .unwrap(),
                 n_peer,
                 peer_per_host,
             );
@@ -91,9 +106,17 @@ async fn main() {
             println!("{:.2?} Put done", Instant::now() - instant);
             peer_thread.abort();
 
+            // sleep(Duration::from_secs(5)).await;
+
             let (handle, peer_thread) = opertion_peer(
                 protocol,
-                format!("{}/tcp/20000", HOSTS[host_i]).parse().unwrap(),
+                format!(
+                    "{}/tcp/{}",
+                    HOSTS[host_i],
+                    thread_rng().gen_range(20000..30000)
+                )
+                .parse()
+                .unwrap(),
                 n_peer,
                 peer_per_host,
             );
@@ -128,7 +151,7 @@ fn opertion_peer(
             )
         }
         "entropy" => {
-            let mut peer = EntropyPeer::random_identity(n_peer, 16, addr);
+            let mut peer = EntropyPeer::new(n_peer, ENTROPY_K, addr);
             peer.subscribe_topics();
             for host in HOSTS {
                 for i in 1..=peer_per_host {
