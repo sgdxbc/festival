@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     task::Poll,
+    time::Duration,
 };
 
 use bincode::Options;
@@ -15,14 +16,15 @@ use libp2p::{
     request_response::{
         ProtocolSupport, RequestResponse, RequestResponseEvent, RequestResponseMessage,
     },
-    swarm::{dummy, NetworkBehaviour, SwarmEvent},
+    swarm::{dummy, keep_alive, NetworkBehaviour, SwarmEvent},
     tcp, Multiaddr, PeerId, Swarm, Transport,
 };
-use rand::{random, thread_rng, Rng};
+use rand::{random, seq::IteratorRandom, thread_rng, Rng};
 use tokio::{
-    select,
+    pin, select,
     sync::{mpsc, oneshot},
     task::spawn_blocking,
+    time::{sleep, Instant},
 };
 use tracing::{info, info_span};
 
@@ -39,6 +41,7 @@ pub struct EntropyBehaviour {
     gossip: Floodsub,
     exchange: RequestResponse<FileExchangeCodec>,
     peer_address: PeerAddress,
+    keep_alive: keep_alive::Behaviour,
     // mdns: mdns::tokio::Behaviour,
 }
 type Event = <EntropyBehaviour as NetworkBehaviour>::OutEvent;
@@ -70,6 +73,8 @@ pub struct EntropyPeer {
     k_put: usize, // with high probability, the min number of honest peers per epoch
     k_select: usize,
 
+    pending_connect_peers: HashSet<PeerId>,
+
     command_sender: mpsc::Sender<Command>,
     command: mpsc::Receiver<Command>,
     wait_put: Option<WaitPut>,
@@ -100,10 +105,7 @@ impl EntropyPeer {
             .authenticate(NoiseAuthenticated::xx(&id_keys).unwrap())
             .multiplex(MplexConfig::new())
             .boxed();
-        let mut gossip = Floodsub::new(peer_id);
-        gossip.subscribe(Topic::new("put"));
-        gossip.subscribe(Topic::new("get"));
-        gossip.subscribe(Topic::new("show"));
+        let gossip = Floodsub::new(peer_id);
         let exchange = RequestResponse::new(
             FileExchangeCodec,
             [(FileExchangeProtocol, ProtocolSupport::Full)],
@@ -115,6 +117,7 @@ impl EntropyPeer {
                 gossip,
                 exchange,
                 peer_address: PeerAddress(Default::default()),
+                keep_alive: keep_alive::Behaviour::default(),
                 // mdns: mdns::Behaviour::new(Default::default()).unwrap(),
             },
             peer_id,
@@ -127,6 +130,7 @@ impl EntropyPeer {
             k,
             k_put: k * 8 / 5,
             k_select: k * 2, //
+            pending_connect_peers: Default::default(),
             command,
             command_sender,
             wait_put: None,
@@ -139,18 +143,51 @@ impl EntropyPeer {
         PeerHandle(self.command_sender.clone())
     }
 
-    pub fn add_peer(&mut self, addr: Multiaddr) {
+    pub fn add_peer(&mut self, addr: Multiaddr, force: bool) {
         let peer_id = addr_to_keypair(&addr).public().into();
+        if peer_id == *self.swarm.local_peer_id() {
+            return;
+        }
         self.swarm
             .behaviour_mut()
             .peer_address
             .0
             .insert(peer_id, addr);
-        if thread_rng().gen_bool(10. / self.n_peer as f64) {
+        if force || thread_rng().gen_bool((10. / self.n_peer as f64).min(1.)) {
             self.swarm
                 .behaviour_mut()
                 .gossip
                 .add_node_to_partial_view(peer_id);
+        }
+    }
+
+    pub fn subscribe_topics(&mut self) {
+        self.swarm
+            .behaviour_mut()
+            .gossip
+            .subscribe(Topic::new("put"));
+        self.swarm
+            .behaviour_mut()
+            .gossip
+            .subscribe(Topic::new("get"));
+        self.swarm
+            .behaviour_mut()
+            .gossip
+            .subscribe(Topic::new("show"));
+    }
+
+    pub fn add_pending_peer(&mut self, addr: Multiaddr) {
+        let peer_id = addr_to_keypair(&addr).public().into();
+        if peer_id == *self.swarm.local_peer_id() {
+            return;
+        }
+        self.swarm
+            .behaviour_mut()
+            .peer_address
+            .0
+            .insert(peer_id, addr);
+        if thread_rng().gen_bool((10. / self.n_peer as f64).min(1.)) {
+            self.pending_connect_peers.insert(peer_id);
         }
     }
 
@@ -169,7 +206,6 @@ impl EntropyPeer {
             .behaviour_mut()
             .gossip
             .publish(Topic::new("put"), id);
-        println!("Published");
         self.wait_put = Some(WaitPut {
             sender: wait_put,
             id,
@@ -181,7 +217,7 @@ impl EntropyPeer {
         });
     }
 
-    fn get(&mut self, id: [u8; 32], wait_get: oneshot::Sender<Vec<u8>>) {
+    fn get(&mut self, id: [u8; 32], size: usize, wait_get: oneshot::Sender<Vec<u8>>) {
         assert!(self.wait_get.is_none());
         // GET step 1: gossip GET
         self.swarm
@@ -191,23 +227,25 @@ impl EntropyPeer {
         self.wait_get = Some(WaitGet {
             sender: wait_get,
             id,
-            decoder: Arc::new(Mutex::new(WirehairDecoder::new(1 << 30, (1 << 30) / 16))),
+            decoder: Arc::new(Mutex::new(WirehairDecoder::new(
+                size as _,
+                (size / 16) as _,
+            ))),
         })
     }
 
     async fn handle_event(&mut self, event: Event) {
-        if matches!(event, Event::Gossip(FloodsubEvent::Message(_))) {
-            println!("{event:?}");
-        }
         match event {
-            Event::Gossip(FloodsubEvent::Subscribed { .. }) => {}
+            Event::Gossip(FloodsubEvent::Subscribed { peer_id: _, .. }) => {
+                // info!("Subscribed from {peer_id}");
+                // self.pending_connect_peers.remove(&peer_id);
+            }
             Event::Gossip(FloodsubEvent::Message(FloodsubMessage {
                 source: peer,
                 data,
                 topics,
                 ..
             })) if topics[0].id() == "put" => {
-                println!("Receive gossip PUT");
                 // select with probability k/N
                 // first generate a random number uniformly in [0, N/k)
                 // if it is inside [0, 1), further scale it to [0, u32::MAX) as final frag id
@@ -307,7 +345,7 @@ impl EntropyPeer {
                         ..
                     },
                 ..
-            }) if self.wait_get.as_ref().map(|wait_get| wait_get.id) == Some(id) => {
+            }) => {
                 // not rery meaningful by now
                 self.swarm
                     .behaviour_mut()
@@ -315,36 +353,89 @@ impl EntropyPeer {
                     .send_response(channel, FileResponse::PushFragOk)
                     .unwrap();
                 // GET step 3: collect push fragment
-                let Some(wait_get) = self.wait_get.as_mut() else {unreachable!()};
-                let mut decoder = wait_get.decoder.lock().unwrap();
-                if decoder.decode(frag_id, &frag).unwrap() {
+                let Some(wait_get) = self.wait_get.as_mut() else {
+                    return; // recover done, this is a late frag
+                };
+                if id != wait_get.id {
+                    return; // ??
+                }
+                {
+                    let mut decoder = wait_get.decoder.lock().unwrap();
+                    if !decoder.decode(frag_id, &frag).unwrap() {
+                        return;
+                    }
+                }
+                let decoder = wait_get.decoder.clone();
+                let object = spawn_blocking(move || {
+                    let _span = info_span!("Recover data object").entered();
+                    let mut decoder = decoder.lock().unwrap();
                     let mut object = vec![0; decoder.message_bytes as _];
                     decoder.recover(&mut object).unwrap();
-                    drop(decoder);
-                    let wait_get = self.wait_get.take().unwrap();
-                    wait_get.sender.send(object).unwrap();
-                }
+                    object
+                })
+                .await
+                .unwrap();
+                let wait_get = self.wait_get.take().unwrap();
+                wait_get.sender.send(object).unwrap();
             }
             event => info!("{event:?}"),
         }
     }
 
     pub async fn run_event_loop(&mut self) {
+        let sleep = sleep(Duration::from_millis(thread_rng().gen_range(100..1000)));
+        pin!(sleep);
         loop {
             select! {
                 command = self.command.recv() => self.handle_command(command.unwrap()).await,
                 event = self.swarm.select_next_some() => match event {
                     SwarmEvent::Behaviour(event) => self.handle_event(event).await,
                     event => info!("{event:?}"),
+                },
+                _ = &mut sleep => {
+                    if self.connect_peer() {
+                        sleep.as_mut().reset(Instant::now() + Duration::from_millis(thread_rng().gen_range(100..1000)));
+                    } else {
+                        sleep.as_mut().reset(Instant::now() + Duration::from_secs(86400));
+                    }
                 }
             }
         }
     }
 
+    fn connect_peer(&mut self) -> bool {
+        // info!("Connect peer: {:?}", self.pending_connect_peers);
+        let peer_id = loop {
+            let Some(&peer_id) = self.pending_connect_peers.iter().choose(&mut thread_rng()) else {
+                self.swarm.behaviour_mut().gossip.subscribe(Topic::new("put"));
+                self.swarm.behaviour_mut().gossip.subscribe(Topic::new("get"));
+                self.swarm.behaviour_mut().gossip.subscribe(Topic::new("show"));
+                println!("READY");
+                return false;
+            };
+            if self.swarm.is_connected(&peer_id) {
+                self.pending_connect_peers.remove(&peer_id);
+            } else {
+                break peer_id;
+            }
+        };
+        // force transport to (re)dial peer
+        // let _ = self.swarm.dial(peer_id);
+        self.swarm
+            .behaviour_mut()
+            .gossip
+            .remove_node_from_partial_view(&peer_id);
+        self.swarm
+            .behaviour_mut()
+            .gossip
+            .add_node_to_partial_view(peer_id);
+        true
+    }
+
     async fn handle_command(&mut self, command: Command) {
         match command {
             Command::Put(object, wait_put) => self.put(object, wait_put).await,
-            Command::Get(id, wait_get) => self.get(id, wait_get),
+            Command::Get(id, size, wait_get) => self.get(id, size, wait_get),
         }
     }
 }

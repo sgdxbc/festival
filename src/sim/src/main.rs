@@ -14,14 +14,14 @@ fn main() {
         n_peer: 20000,
         failure_rate: 4.,
         n_object: 10,
-        // protocol: ProtocolConfig::Festival {
-        //     n_peer_per_age: 26,
-        //     k: 256,
-        //     k_repair: 400,
-        //     check_celebration_sec: 24 * 3600,
-        //     gossip_sec: 18 * 3600,
-        // },
-        protocol: ProtocolConfig::Replicated { n: 20 },
+        protocol: ProtocolConfig::Festival {
+            n_peer_per_age: 32,
+            k: 16,
+            k_repair: 25,
+            check_celebration_sec: 24 * 3600,
+            gossip_sec: 18 * 3600,
+        },
+        // protocol: ProtocolConfig::Replicated { n: 3 },
     };
     println!("{config:?}");
 

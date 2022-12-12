@@ -50,9 +50,11 @@ async fn main() {
             );
             for host in HOSTS {
                 for i in 1..=peer_per_host {
-                    peer.add_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap());
+                    peer.add_pending_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap());
                 }
             }
+            peer.add_peer(format!("{}/tcp/10000", HOSTS[0]).parse().unwrap(), true);
+            peer.add_peer(format!("{}/tcp/20000", HOSTS[0]).parse().unwrap(), true);
             peer.run_event_loop().await
         }
         (Some("kad"), None) => {
@@ -70,13 +72,11 @@ async fn main() {
             peer.run_event_loop().await
         }
         (Some(protocol), Some("putget")) => {
-            let mut object = vec![
-                0;
-                args()
-                    .nth(6)
-                    .map(|arg| arg.parse().unwrap())
-                    .unwrap_or(1 << 30)
-            ];
+            let size = args()
+                .nth(6)
+                .map(|arg| arg.parse().unwrap())
+                .unwrap_or(1 << 30);
+            let mut object = vec![0; size];
             thread_rng().fill(&mut object[..]);
 
             let (handle, peer_thread) = opertion_peer(
@@ -99,10 +99,10 @@ async fn main() {
             );
             sleep(Duration::from_secs(1)).await;
             let instant = Instant::now();
-            let object_ = handle.get(id).await;
+            let object_ = handle.get(size, id).await;
             println!("{:.2?} Get done", Instant::now() - instant);
-            peer_thread.abort();
             assert_eq!(object_, object);
+            peer_thread.abort();
         }
         _ => panic!(),
     }
@@ -129,9 +129,10 @@ fn opertion_peer(
         }
         "entropy" => {
             let mut peer = EntropyPeer::random_identity(n_peer, 16, addr);
+            peer.subscribe_topics();
             for host in HOSTS {
                 for i in 1..=peer_per_host {
-                    peer.add_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap());
+                    peer.add_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap(), false);
                 }
             }
             (

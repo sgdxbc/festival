@@ -49,7 +49,7 @@ pub enum ProtocolConfig {
 pub struct SystemStats {
     n_failure: u32,
     n_gossip: u32,
-    n_repair: u32,
+    n_repair: f32,
     n_store: f32,
 }
 
@@ -182,7 +182,7 @@ impl<R: Rng> System<R> {
                         .unwrap()
                         .fragments
                         .insert(*object_id, ());
-                    self.stats.n_repair += 1;
+                    self.stats.n_repair += 1.;
                     self.stats.n_store += 1.;
                 }
             }
@@ -304,7 +304,7 @@ impl<R: Rng> System<R> {
         // original data object (strictly speaking it should be
         // slightly larger, but wirehair works well enough to
         //  ignore that)
-        self.stats.n_repair += 1;
+        self.stats.n_repair += 1. / k as f32;
         // peer.fragments.insert(object_id, Fragment::Festival { age });
         peer.fragments.insert(object_id, ());
         self.stats.n_store += 1. / k as f32;

@@ -10,9 +10,10 @@ async def spawn_instance(sem, i):
     p = await run("./peer", "entropy", str(host_i), str(n_instance), str(i), stdout=PIPE, stderr=PIPE)
     while not p.stdout.at_eof():
         line = await p.stdout.readline()
-        print(line.decode(), end='')
-        # if line.decode().strip() == "Ready":
-        #     sem.release()
+        if line.decode().strip() == "READY":
+            sem.release()
+        else:
+            print(line.decode(), end='')
     _, error_lines = await p.communicate()
     if error_lines := error_lines.decode().strip():
         print(error_lines)
@@ -30,8 +31,9 @@ async def main():
         # if (i + 1) % 10 == 0:
         # print(f"{i + 1} / {n_instance}")
         # await sleep(0.01)
-    # for _ in range(n_instance):
-    #     await sem.acquire()
+    for i in range(n_instance):
+        await sem.acquire()
+        print(f"{i + 1} / {n_instance}")
     
     print("Press ENTER to exit ")
     reader = StreamReader(loop=get_running_loop())

@@ -312,7 +312,7 @@ impl KadPeer {
     fn handle_command(&mut self, command: Command) {
         match command {
             Command::Put(object, wait_put) => self.put(object, wait_put),
-            Command::Get(id, wait_get) => self.get(id, wait_get),
+            Command::Get(id, _, wait_get) => self.get(id, wait_get),
         }
     }
 }
