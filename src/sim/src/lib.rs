@@ -72,14 +72,9 @@ enum Event {
 
 #[derive(Default)]
 struct Peer {
-    fragments: FxHashMap<[u8; 32], ()>,
-    eligible_objects: FxHashMap<[u8; 32], FxHashMap<[u8; 32], u32>>,
+    fragments: FxHashSet<[u8; 32]>,
+    responsible_objects: FxHashMap<[u8; 32], FxHashMap<[u8; 32], u32>>,
 }
-
-// enum Fragment {
-//     Festival { age: u32 },
-//     // Kademlia
-// }
 
 impl SystemOracle {
     fn push_event(&mut self, after_sec: u32, event: Event) {
@@ -160,7 +155,7 @@ impl<R: Rng> System<R> {
             ProtocolConfig::Replicated { .. } => {
                 self.stats.n_store -= peer.fragments.len() as f32;
 
-                for object_id in peer.fragments.keys() {
+                for object_id in &peer.fragments {
                     let removed = self
                         .object_peers
                         .get_mut(object_id)
@@ -168,6 +163,10 @@ impl<R: Rng> System<R> {
                         .remove(&peer_id);
                     assert!(removed);
 
+                    // choose next peer here bring an issue that the replacing
+                    // peer will never be selected
+                    // however, that may be what we exactly want, since here we
+                    // have a failure
                     let mut peer_id;
                     while {
                         peer_id = *self.peers.keys().choose(&mut self.rng).unwrap();
@@ -181,7 +180,7 @@ impl<R: Rng> System<R> {
                         .get_mut(&peer_id)
                         .unwrap()
                         .fragments
-                        .insert(*object_id, ());
+                        .insert(*object_id);
                     self.stats.n_repair += 1.;
                     self.stats.n_store += 1.;
                 }
@@ -199,9 +198,8 @@ impl<R: Rng> System<R> {
 
     fn on_gossip_fragment(&mut self, peer_id: [u8; 32], object_id: [u8; 32], age: u32) {
         let ProtocolConfig::Festival {check_celebration_sec, gossip_sec, ..} = self.config.protocol else {
-                                unreachable!()
-                            };
-
+            unreachable!()
+        };
         if !self.peers.contains_key(&peer_id) {
             return;
         }
@@ -210,20 +208,16 @@ impl<R: Rng> System<R> {
             if peer2_id == peer_id {
                 continue;
             }
-            if peer2.fragments.contains_key(&object_id) {
+            if peer2.fragments.contains(&object_id) {
                 continue; // TODO garbage collection
             }
-            if let Some(alive_peers) = peer2.eligible_objects.get_mut(&object_id) {
+            if let Some(alive_peers) = peer2.responsible_objects.get_mut(&object_id) {
                 alive_peers.insert(peer_id, age);
-            } else if let Some(_i) = Self::eligible(peer2_id, object_id, age + 1, &self.config) {
-                // println!(
-                //     "{:02x?} {:8} start tracking for age {}",
-                //     &peer2_id[..4],
-                //     self.oracle.now_sec,
-                //     age + 1
-                // );
+            } else if let Some(_i) =
+                Self::check_responsible(peer2_id, object_id, age + 1, &self.config)
+            {
                 peer2
-                    .eligible_objects
+                    .responsible_objects
                     .insert(object_id, [(peer_id, age)].into_iter().collect());
                 self.oracle.push_event(
                     (gossip_sec..check_celebration_sec)
@@ -252,9 +246,9 @@ impl<R: Rng> System<R> {
             unreachable!()
         };
         let Some(peer) = self.peers.get_mut(&peer_id) else {
-                        return;
-                    };
-        let alive_peers = peer.eligible_objects.remove(&object_id).unwrap();
+            return;
+        };
+        let alive_peers = peer.responsible_objects.remove(&object_id).unwrap();
         let local_alive_len = alive_peers.len();
         let mut global_alive_len = 0;
         let mut later_len = 0;
@@ -266,10 +260,6 @@ impl<R: Rng> System<R> {
                 later_len += 1;
             }
         }
-        // println!(
-        //     "{:8} check local {local_alive_len} global {global_alive_len}",
-        //     self.oracle.now_sec
-        // );
         assert!(
             global_alive_len >= k,
             "object lost: {global_alive_len} < {k}"
@@ -279,7 +269,8 @@ impl<R: Rng> System<R> {
         };
         if local_alive_len >= k_repair {
             if later_len < k_repair {
-                peer.eligible_objects.insert(object_id, Default::default());
+                peer.responsible_objects
+                    .insert(object_id, Default::default());
                 self.oracle.push_event(
                     check_celebration_sec,
                     Event::CheckCelebration {
@@ -292,21 +283,11 @@ impl<R: Rng> System<R> {
             return;
         }
         // start repairing
-        // println!(
-        //     "{:02x?} {:8} repair into age {age}",
-        //     &peer_id[..4],
-        //     self.oracle.now_sec
-        // );
-        // it does not matter who to fetch fragments, as long as
-        // we can find enough peers (which is asserted above),
-        // and correctly record traffic overhead
-        // the total amount of fetching equals to the size of
-        // original data object (strictly speaking it should be
-        // slightly larger, but wirehair works well enough to
-        //  ignore that)
-        self.stats.n_repair += 1. / k as f32;
-        // peer.fragments.insert(object_id, Fragment::Festival { age });
-        peer.fragments.insert(object_id, ());
+        // it does not matter who to fetch fragments, as long as we can find
+        // enough peers (which is asserted above), and correctly record traffic
+        // overhead
+        self.stats.n_repair += 1. / k as f32; // TODO determine with/without booster
+        peer.fragments.insert(object_id);
         self.stats.n_store += 1. / k as f32;
         self.oracle.push_event(
             (0..gossip_sec).choose(&mut self.rng).unwrap(),
@@ -324,7 +305,7 @@ impl<R: Rng> System<R> {
         assert!(present.is_none());
     }
 
-    fn eligible(
+    fn check_responsible(
         peer_id: [u8; 32],
         object_id: [u8; 32],
         age: u32,
@@ -359,9 +340,7 @@ impl<R: Rng> System<R> {
                     .choose_multiple(&mut self.rng, k_repair)
                     .into_iter()
                     .for_each(|(&peer_id, peer)| {
-                        // peer.fragments
-                        //     .insert(object_id, Fragment::Festival { age: 1 });
-                        peer.fragments.insert(object_id, ());
+                        peer.fragments.insert(object_id);
                         self.oracle.push_event(
                             (0..gossip_sec).choose(&mut self.rng).unwrap(),
                             Event::GossipFragment {
@@ -385,7 +364,7 @@ impl<R: Rng> System<R> {
                 );
                 for peer_id in &self.object_peers[&object_id] {
                     let peer = self.peers.get_mut(peer_id).unwrap();
-                    peer.fragments.insert(object_id, ());
+                    peer.fragments.insert(object_id);
                 }
                 self.stats.n_store += n as f32;
             }

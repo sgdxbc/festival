@@ -307,6 +307,8 @@ impl EntropyPeer {
             }) => {
                 // PUT step 4: gossip SHOW
                 self.fragments = Some((id, frag_id, frag));
+                let duration = Duration::from_millis(thread_rng().gen_range(0..3000));
+                sleep(duration).await;
                 self.swarm.behaviour_mut().gossip.publish(
                     Topic::new("show"),
                     bincode::options().serialize(&(id, frag_id)).unwrap(),
@@ -403,7 +405,8 @@ impl EntropyPeer {
                 command = self.command.recv() => self.handle_command(command.unwrap()).await,
                 event = self.swarm.select_next_some() => match event {
                     SwarmEvent::Behaviour(event) => self.handle_event(event).await,
-                    SwarmEvent::ConnectionEstablished { .. } | SwarmEvent::IncomingConnection { .. } | SwarmEvent::Dialing(_) => {}
+                    // SwarmEvent::ConnectionEstablished { .. } |
+                    SwarmEvent::IncomingConnection { .. } | SwarmEvent::Dialing(_) => {}
                     event => info!("{event:?}"),
                 },
                 _ = &mut sleep => {
@@ -421,9 +424,7 @@ impl EntropyPeer {
         // info!("Connect peer: {:?}", self.pending_connect_peers);
         let peer_id = loop {
             let Some(&peer_id) = self.pending_connect_peers.iter().choose(&mut thread_rng()) else {
-                self.swarm.behaviour_mut().gossip.subscribe(Topic::new("put"));
-                self.swarm.behaviour_mut().gossip.subscribe(Topic::new("get"));
-                self.swarm.behaviour_mut().gossip.subscribe(Topic::new("show"));
+                self.subscribe_topics();
                 println!("READY");
                 return false;
             };

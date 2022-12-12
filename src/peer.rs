@@ -83,12 +83,12 @@ impl RequestResponseCodec for FileExchangeCodec {
         io: &mut T,
     ) -> io::Result<Self::Request> {
         let mut request = bincode::options()
-            .deserialize(&read_length_prefixed(io, 1024).await.unwrap())
+            .deserialize(&read_length_prefixed(io, 1024).await?)
             .unwrap();
         if let FileRequest::Push(object) = &mut request {
-            *object = read_length_prefixed(io, 2 << 30).await.unwrap()
+            *object = read_length_prefixed(io, 2 << 30).await?
         } else if let FileRequest::PushFrag(_, _, frag) = &mut request {
-            *frag = read_length_prefixed(io, 2 << 30).await.unwrap()
+            *frag = read_length_prefixed(io, 2 << 30).await?
         }
         Ok(request)
     }
@@ -102,9 +102,9 @@ impl RequestResponseCodec for FileExchangeCodec {
             .deserialize(&read_length_prefixed(io, 1024).await?)
             .unwrap();
         if let FileResponse::PullOk(object) = &mut response {
-            *object = read_length_prefixed(io, 2 << 30).await.unwrap()
+            *object = read_length_prefixed(io, 2 << 30).await?
         } else if let FileResponse::PullFragOk(_, _, frag) = &mut response {
-            *frag = read_length_prefixed(io, 2 << 30).await.unwrap()
+            *frag = read_length_prefixed(io, 2 << 30).await?
         }
         Ok(response)
     }
@@ -118,21 +118,15 @@ impl RequestResponseCodec for FileExchangeCodec {
         match &mut data {
             FileRequest::Push(object) => {
                 let object = take(object);
-                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap())
-                    .await
-                    .unwrap();
-                write_length_prefixed(io, object).await.unwrap()
+                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap()).await?;
+                write_length_prefixed(io, object).await?
             }
             FileRequest::PushFrag(_, _, frag) => {
                 let frag = take(frag);
-                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap())
-                    .await
-                    .unwrap();
-                write_length_prefixed(io, frag).await.unwrap()
+                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap()).await?;
+                write_length_prefixed(io, frag).await?
             }
-            data => write_length_prefixed(io, &bincode::options().serialize(data).unwrap())
-                .await
-                .unwrap(),
+            data => write_length_prefixed(io, &bincode::options().serialize(data).unwrap()).await?,
         }
         Ok(())
     }
@@ -146,21 +140,15 @@ impl RequestResponseCodec for FileExchangeCodec {
         match &mut data {
             FileResponse::PullOk(object) => {
                 let object = take(object);
-                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap())
-                    .await
-                    .unwrap();
-                write_length_prefixed(io, object).await.unwrap()
+                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap()).await?;
+                write_length_prefixed(io, object).await?;
             }
             FileResponse::PullFragOk(_, _, frag) => {
                 let frag = take(frag);
-                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap())
-                    .await
-                    .unwrap();
-                write_length_prefixed(io, frag).await.unwrap()
+                write_length_prefixed(io, &bincode::options().serialize(&data).unwrap()).await?;
+                write_length_prefixed(io, frag).await?;
             }
-            data => write_length_prefixed(io, &bincode::options().serialize(data).unwrap())
-                .await
-                .unwrap(),
+            data => write_length_prefixed(io, &bincode::options().serialize(data).unwrap()).await?,
         }
         Ok(())
     }

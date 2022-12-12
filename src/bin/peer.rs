@@ -47,6 +47,10 @@ async fn main() {
     let peer_per_host = args().nth(3).unwrap().parse::<usize>().unwrap();
     let n_peer = peer_per_host * HOSTS.len();
     let peer_i = args().nth(4).unwrap().parse::<u16>().unwrap();
+    let (put_port, get_port) = (
+        thread_rng().gen_range(20000..20100),
+        thread_rng().gen_range(30000..30100),
+    );
     match (args().nth(1).as_deref(), args().nth(5).as_deref()) {
         (Some("entropy"), None) => {
             let mut peer = EntropyPeer::new(
@@ -58,11 +62,16 @@ async fn main() {
             );
             for host in HOSTS {
                 for i in 1..=peer_per_host {
-                    peer.add_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap(), false);
+                    peer.add_pending_peer(format!("{host}/tcp/{}", 10000 + i).parse().unwrap());
+                }
+
+                for port in 20000..20100 {
+                    peer.add_peer(format!("{host}/tcp/{port}").parse().unwrap(), true);
+                }
+                for port in 30000..30100 {
+                    peer.add_peer(format!("{host}/tcp/{port}").parse().unwrap(), true);
                 }
             }
-            peer.add_peer(format!("{}/tcp/10000", HOSTS[0]).parse().unwrap(), true);
-            peer.add_peer(format!("{}/tcp/20000", HOSTS[0]).parse().unwrap(), true);
             peer.run_event_loop().await
         }
         (Some("kad"), None) => {
@@ -96,13 +105,7 @@ async fn main() {
 
             let (handle, peer_thread) = opertion_peer(
                 protocol,
-                format!(
-                    "{}/tcp/{}",
-                    HOSTS[host_i],
-                    thread_rng().gen_range(20000..30000)
-                )
-                .parse()
-                .unwrap(),
+                format!("{}/tcp/{put_port}", HOSTS[host_i]).parse().unwrap(),
                 n_peer,
                 peer_per_host,
             );
@@ -116,13 +119,7 @@ async fn main() {
 
             let (handle, peer_thread) = opertion_peer(
                 protocol,
-                format!(
-                    "{}/tcp/{}",
-                    HOSTS[host_i],
-                    thread_rng().gen_range(20000..30000)
-                )
-                .parse()
-                .unwrap(),
+                format!("{}/tcp/{get_port}", HOSTS[host_i]).parse().unwrap(),
                 n_peer,
                 peer_per_host,
             );
