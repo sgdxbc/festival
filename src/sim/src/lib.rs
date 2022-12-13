@@ -48,14 +48,15 @@ pub enum ProtocolConfig {
 
 #[derive(Debug, Default)]
 pub struct SystemStats {
-    n_failure: u32,
-    n_repair: f32,
-    n_store: f32,
+    pub n_failure: u32,
+    pub n_repair: f32,
+    pub n_store: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Event {
     PeerFailure,
+    Checkpoint,
     // festival
     // GossipFragment {
     //     peer_id: [u8; 32],
@@ -102,6 +103,7 @@ impl<R: Rng> System<R> {
             system.insert_object(id);
         }
         system.oracle.push_event(1, Event::PeerFailure);
+        // system.oracle.push_event(86400, Event::Checkpoint);
         system
     }
 
@@ -117,6 +119,10 @@ impl<R: Rng> System<R> {
         } {
             match event {
                 Event::PeerFailure => self.on_peer_failure(),
+                Event::Checkpoint => {
+                    println!("entropyF,{},{},{}", self.oracle.now_sec, self.stats.n_repair, self.stats.n_store);
+                    self.oracle.push_event(86400, Event::Checkpoint);
+                }
             }
 
             let now = Instant::now();

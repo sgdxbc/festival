@@ -1112,15 +1112,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "festival-sim"
-version = "0.1.0"
-dependencies = [
- "rand 0.8.5",
- "rand_distr",
- "rustc-hash",
-]
-
-[[package]]
 name = "ff"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3630,6 +3621,15 @@ checksum = "74233d3b3b2f6d4b006dc19dee745e73e2a6bfb6f93607cd3b02bd5b00797d7c"
 dependencies = [
  "digest 0.10.6",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "sim"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.5",
+ "rand_distr",
+ "rustc-hash",
 ]
 
 [[package]]
