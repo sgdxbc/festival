@@ -4,15 +4,15 @@ use rand::{rngs::SmallRng, SeedableRng};
 use sim::{ProtocolConfig, System, SystemConfig};
 
 fn main() {
-    let cache_hit_rate = 1.;
+    let cache_hit_rate = 0.;
     let config = SystemConfig {
         n_peer: 100000,
-        failure_rate: 1.,
-        n_object: 1,
+        failure_rate: 4.,
+        n_object: 1000,
         protocol: ProtocolConfig::Festival {
             k: 64,
             k_select: 64 * 2,
-            k_repair: 64 * 8 / 5,
+            k_repair: 64 * 6 / 5,
             cache_hit_rate,
         },
         // protocol: ProtocolConfig::Replicated { n: 3 },
@@ -31,12 +31,16 @@ fn main() {
             );
 
             let mut system = System::new(rng, config.clone());
-            system.run(10 * 365 * 86400);
+            system.run(365 * 86400);
             println!("{:?}", system.stats);
 
             println!(
                 "entropy-{cache_hit_rate},{},{},{},{}",
-                config.n_peer, config.failure_rate, config.n_object, system.stats.n_repair
+                // "replicated,{},{},{},{}",
+                config.n_peer,
+                config.failure_rate,
+                config.n_object,
+                system.stats.n_repair
             );
         }));
     }

@@ -19,8 +19,8 @@ pub struct System<R> {
 }
 
 struct SystemOracle {
-    now_sec: u32,
-    events: BinaryHeap<(Reverse<u32>, Event)>,
+    now_sec: u64,
+    events: BinaryHeap<(Reverse<u64>, Event)>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +48,7 @@ pub enum ProtocolConfig {
 
 #[derive(Debug, Default)]
 pub struct SystemStats {
-    pub n_failure: u32,
+    pub n_failure: u64,
     pub n_repair: f32,
     pub n_store: f32,
 }
@@ -72,12 +72,12 @@ enum Event {
 
 #[derive(Default)]
 struct Peer {
-    fragments: FxHashMap<[u8; 32], u32>,
+    fragments: FxHashMap<[u8; 32], u64>,
     // responsible_objects: FxHashMap<[u8; 32], FxHashMap<[u8; 32], u32>>,
 }
 
 impl SystemOracle {
-    fn push_event(&mut self, after_sec: u32, event: Event) {
+    fn push_event(&mut self, after_sec: u64, event: Event) {
         self.events.push((Reverse(self.now_sec + after_sec), event));
     }
 }
@@ -107,7 +107,7 @@ impl<R: Rng> System<R> {
         system
     }
 
-    pub fn run(&mut self, until_sec: u32) {
+    pub fn run(&mut self, until_sec: u64) {
         let mut instant = Instant::now();
         let mut event;
         while {
@@ -237,7 +237,7 @@ impl<R: Rng> System<R> {
     fn check_responsible(
         peer_id: [u8; 32],
         object_id: [u8; 32],
-        age: u32,
+        age: u64,
         config: &SystemConfig,
     ) -> Option<u32> {
         let mut hasher = FxHasher::default();
