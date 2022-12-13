@@ -5,12 +5,12 @@ use sim::{ProtocolConfig, System, SystemConfig};
 
 fn main() {
     let cache_hit_rate = 0.;
-    let faulty_rate = 0.8;
+    let faulty_rate = 0.;
     let config = SystemConfig {
         n_peer: 100000,
         failure_rate: 1.,
         faulty_rate,
-        n_object: 1000,
+        n_object: 1,
         protocol: ProtocolConfig::Festival {
             k: 64,
             k_select: 64 * 12 / 5,
@@ -22,7 +22,7 @@ fn main() {
     println!("{config:?}");
 
     let mut threads = Vec::new();
-    for i in 0..10 {
+    for i in 0..1 {
         let config = config.clone();
         threads.push(spawn(move || {
             let rng = SmallRng::seed_from_u64(
@@ -33,7 +33,7 @@ fn main() {
             );
 
             let mut system = System::new(rng, config.clone());
-            system.run(365 * 86400);
+            system.run(10 * 365 * 86400);
             println!("{:?}", system.stats);
 
             println!(

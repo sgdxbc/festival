@@ -106,7 +106,7 @@ impl<R: Rng> System<R> {
             system.insert_object(id);
         }
         system.oracle.push_event(1, Event::PeerFailure);
-        // system.oracle.push_event(86400, Event::Checkpoint);
+        system.oracle.push_event(86400, Event::Checkpoint);
         system
     }
 
