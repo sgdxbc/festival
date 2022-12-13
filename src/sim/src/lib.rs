@@ -27,6 +27,7 @@ struct SystemOracle {
 pub struct SystemConfig {
     pub n_peer: usize,
     pub failure_rate: f32,
+    pub faulty_rate: f32,
     pub n_object: usize,
     pub protocol: ProtocolConfig,
 }
@@ -51,6 +52,7 @@ pub struct SystemStats {
     pub n_failure: u64,
     pub n_repair: f32,
     pub n_store: f32,
+    pub n_lost: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -72,6 +74,7 @@ enum Event {
 
 #[derive(Default)]
 struct Peer {
+    is_faulty: bool,
     fragments: FxHashMap<[u8; 32], u64>,
     // responsible_objects: FxHashMap<[u8; 32], FxHashMap<[u8; 32], u32>>,
 }
@@ -120,7 +123,10 @@ impl<R: Rng> System<R> {
             match event {
                 Event::PeerFailure => self.on_peer_failure(),
                 Event::Checkpoint => {
-                    println!("entropyF,{},{},{}", self.oracle.now_sec, self.stats.n_repair, self.stats.n_store);
+                    println!(
+                        "entropyF,{},{},{}",
+                        self.oracle.now_sec, self.stats.n_repair, self.stats.n_store
+                    );
                     self.oracle.push_event(86400, Event::Checkpoint);
                 }
             }
@@ -150,18 +156,33 @@ impl<R: Rng> System<R> {
                 cache_hit_rate,
                 ..
             } => {
+                assert!(!peer.is_faulty || peer.fragments.is_empty());
                 self.stats.n_store -= peer.fragments.len() as f32 / k as f32;
 
                 for (object_id, age) in peer.fragments {
+                    if !self.object_peers.contains_key(&object_id) {
+                        // this object already lost
+                        continue;
+                    }
+
                     let removed = self
                         .object_peers
                         .get_mut(&object_id)
                         .unwrap()
                         .remove(&peer_id);
                     assert!(removed);
-                    assert!(self.object_peers[&object_id].len() >= k);
+                    // assert!(self.object_peers[&object_id].len() >= k);
+                    if self.object_peers[&object_id].len() < k {
+                        self.stats.n_failure += 1;
+                        self.object_peers.remove(&object_id);
+                        continue;
+                    }
+
                     if self.object_peers[&object_id].len() < k_repair {
                         for (&peer_id, peer) in &mut self.peers {
+                            if peer.is_faulty {
+                                continue;
+                            }
                             if self.object_peers[&object_id].contains(&peer_id) {
                                 continue;
                             }
@@ -188,6 +209,10 @@ impl<R: Rng> System<R> {
                 self.stats.n_store -= peer.fragments.len() as f32;
 
                 for object_id in peer.fragments.keys() {
+                    if !self.object_peers.contains_key(object_id) {
+                        continue;
+                    }
+
                     let removed = self
                         .object_peers
                         .get_mut(object_id)
@@ -204,6 +229,10 @@ impl<R: Rng> System<R> {
                         peer_id = *self.peers.keys().choose(&mut self.rng).unwrap();
                         self.object_peers[object_id].contains(&peer_id)
                     } {}
+                    if peer.is_faulty {
+                        continue;
+                    }
+
                     self.object_peers
                         .get_mut(object_id)
                         .unwrap()
@@ -230,7 +259,13 @@ impl<R: Rng> System<R> {
 
     fn insert_peer(&mut self) {
         let peer_id = self.rng.gen();
-        let present = self.peers.insert(peer_id, Peer::default());
+        let present = self.peers.insert(
+            peer_id,
+            Peer {
+                is_faulty: self.rng.gen_bool(self.config.faulty_rate as _),
+                ..Default::default()
+            },
+        );
         assert!(present.is_none());
     }
 
@@ -259,31 +294,42 @@ impl<R: Rng> System<R> {
                 let mut peers = FxHashSet::default();
                 self.peers
                     .iter_mut()
-                    .filter(|(&peer_id, _)| {
-                        Self::check_responsible(peer_id, object_id, 1, &self.config).is_some()
+                    .filter(|(&peer_id, peer)| {
+                        !peer.is_faulty
+                            && Self::check_responsible(peer_id, object_id, 1, &self.config)
+                                .is_some()
                     })
                     .for_each(|(&peer_id, peer)| {
                         peer.fragments.insert(object_id, 1);
                         peers.insert(peer_id);
                     });
-                self.object_peers.insert(object_id, peers);
-                self.stats.n_store += self.object_peers[&object_id].len() as f32 / k as f32;
+
+                self.stats.n_store += peers.len() as f32 / k as f32;
+                if peers.len() < k {
+                    self.stats.n_lost += 1;
+                } else {
+                    self.object_peers.insert(object_id, peers);
+                }
             }
             ProtocolConfig::Replicated { n, .. } => {
-                self.object_peers.insert(
-                    object_id,
-                    self.peers
-                        .keys()
-                        .cloned()
-                        .choose_multiple(&mut self.rng, n)
-                        .into_iter()
-                        .collect(),
-                );
-                for peer_id in &self.object_peers[&object_id] {
-                    let peer = self.peers.get_mut(peer_id).unwrap();
-                    peer.fragments.insert(object_id, 0);
+                let peers = self
+                    .peers
+                    .keys()
+                    .cloned()
+                    .choose_multiple(&mut self.rng, n)
+                    .into_iter()
+                    .filter(|peer| !self.peers[peer].is_faulty)
+                    .collect::<FxHashSet<_>>();
+                if peers.is_empty() {
+                    self.stats.n_lost += 1;
+                } else {
+                    self.stats.n_store += peers.len() as f32;
+                    self.object_peers.insert(object_id, peers);
+                    for peer_id in &self.object_peers[&object_id] {
+                        let peer = self.peers.get_mut(peer_id).unwrap();
+                        peer.fragments.insert(object_id, 0);
+                    }
                 }
-                self.stats.n_store += n as f32;
             }
         }
     }
