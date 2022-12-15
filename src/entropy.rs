@@ -245,9 +245,9 @@ impl EntropyPeer {
     }
 
     async fn handle_event(&mut self, event: Event) {
-        if matches!(event, Event::Gossip(FloodsubEvent::Message(_))) {
-            info!("{event:?}");
-        }
+        // if matches!(event, Event::Gossip(FloodsubEvent::Message(_))) {
+        //     info!("{event:?}");
+        // }
         match event {
             Event::Gossip(FloodsubEvent::Subscribed { peer_id: _, .. }) => {
                 // info!("Receive Subscribed from {peer_id}");
@@ -405,7 +405,7 @@ impl EntropyPeer {
                 command = self.command.recv() => self.handle_command(command.unwrap()).await,
                 event = self.swarm.select_next_some() => match event {
                     SwarmEvent::Behaviour(event) => self.handle_event(event).await,
-                    // SwarmEvent::ConnectionEstablished { .. } |
+                    SwarmEvent::ConnectionEstablished { .. } |
                     SwarmEvent::IncomingConnection { .. } | SwarmEvent::Dialing(_) => {}
                     event => info!("{event:?}"),
                 },
